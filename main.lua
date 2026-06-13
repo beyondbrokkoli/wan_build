@@ -219,29 +219,83 @@ net.SetPlayerId(local_id)
 net.SetSession(session_token) 
 
 print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
+-- ... Your existing matchmaker polling loop ...
+print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
+while true do
+    local raw_res = http_get(MATCHMAKER_URL .. "/status/" .. lobby_id)
+    -- Parse response, break when status == "locked" and we have the peer roster
+    if status == "locked" then break end
+    os.execute("sleep 1") -- Or your non-blocking loop sleep
+end
 
-for i, p in ipairs(status_data.players) do
-    local peer_id = i - 1
-    
-    if peer_id ~= local_id then
-        if p.ip == my_pub_ip and p.local_ip == my_local_ip then
-            -- Tier 1: Same Machine (Loopback)
-            print(string.format("[ROUTE] Node %d -> Loopback (127.0.0.1:%d)", peer_id, p.local_port))
-            net.Connect(peer_id, "127.0.0.1", p.local_port)
+print("[ICE] Quorum locked. Initiating Gleis 9 3/4 NAT Traversal...")
+
+-- 1. Prime the C-routing table with the roster's reported public endpoints
+for _, peer in ipairs(roster.peers) do
+    if peer.id ~= ctx.net_identity then
+        -- Set their initial target to their public STUN-reported IP/Port
+        net.Connect(peer.id, peer.public_ip, peer.public_port)
+    end
+end
+
+-- 2. Open the 5-Second P2P Hole Punching Window
+local P2P_WINDOW_SECS = 5.0
+local start_time = os.clock()
+print(string.format("[ICE] Blasting P2P tokens. Window open for %.1f seconds...", P2P_WINDOW_SECS))
+
+-- Temporary burst buffer just for the handshake phase
+local handshake_buffer = ffi.new("LockstepPacket[32]")
+
+while (os.clock() - start_time) < P2P_WINDOW_SECS do
+    -- Send a heartbeat/ping packet directly to all active peers
+    for p = 0, 7 do
+        if p ~= ctx.net_identity and ctx.peer_active[p] then
+            -- Construct a lightweight ping packet using your ffi structures
+            local ping_pkt = ffi.new("LockstepPacket")
+            ping_pkt.session_token = session_token
+            ping_pkt.player_id = ctx.net_identity
+            ping_pkt.frame_tick = 0 -- Marker for handshake
             
-        elseif p.ip == my_pub_ip and p.local_ip ~= my_local_ip then
-            -- Tier 2: Same Network (LAN Hairpin)
-            print(string.format("[ROUTE] Node %d -> LAN Hairpin (%s:%d)", peer_id, p.local_ip, p.local_port))
-            net.Connect(peer_id, p.local_ip, p.local_port)
-            
+            net.SendTo(ping_pkt, p)
+        end
+    end
+
+    -- Flush the ingress socket to see if anyone punched through to us
+    local count = net.RecvAll(handshake_buffer, 32)
+    for i = 0, count - 1 do
+        local pkt = handshake_buffer[i]
+        if pkt.session_token == session_token and pkt.frame_tick == 0 then
+            -- The C-backend's `vx_net_recv_all` just implicitly learned this peer's 
+            -- direct residential IP because it came from a non-relay source!
+            if ctx.peer_p2p_established[pkt.player_id] ~= true then
+                ctx.peer_p2p_established[pkt.player_id] = true
+                print(string.format("[ICE] P2P Direct Punch-Through SUCCESS for Player %d!", pkt.player_id))
+            end
+        end
+    end
+
+    -- Small sleep to avoid burning the CPU during the 5-second handshake
+    socket.sleep(0.05) 
+end
+
+-- 3. Fallback Evaluation (The Magic Step)
+print("[ICE] Hole punching window closed. Evaluating routing topologies...")
+net.SetRelayIP("138.199.152.240") -- Protect the learned P2P routes from the relay
+
+for p = 0, 7 do
+    if p ~= ctx.net_identity and ctx.peer_active[p] then
+        if ctx.peer_p2p_established[p] then
+            print(string.format("[ROUTING] Player %d -> P2P [DIRECT RESIDENTIAL]", p))
         else
-            -- Tier 3: Guaranteed WAN (Hetzner UDP Relay) - NO P2P HOLE PUNCHING
-            print(string.format("[ROUTE] Node %d -> Hetzner UDP Relay (138.199.152.240:49152)", peer_id))
-            net.Connect(peer_id, "138.199.152.240", 49152)
+            -- Symmetric NAT or strict firewall detected. Force this specific slot to the relay!
+            print(string.format("[ROUTING] Player %d -> P2P [FAILED]. Falling back to Hetzner Relay.", p))
+            net.Connect(p, "138.199.152.240", 49152)
         end
     end
 end
 
+print("[SYSTEM] All routes bound. Launching pristine FSM loop...")
+-- FSM.enter_playing_state() begins here
 
 -- Perfect sync: server_time and start_time arrive in the exact same HTTP response
 local real_time_remaining = status_data.start_time - status_data.server_time
