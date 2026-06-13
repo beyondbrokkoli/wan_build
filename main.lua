@@ -16,6 +16,8 @@ ffi.cdef[[
     int QueryPerformanceFrequency(int64_t *lpFrequency);
     typedef struct { long tv_sec; long tv_nsec; } timespec;
     int clock_gettime(int clk_id, timespec *tp);
+
+    uint64_t strtoull(const char *nptr, char **endptr, int base);
 ]]
 
 local function sys_sleep(ms)
@@ -83,25 +85,7 @@ local function get_local_ip()
     return res
 end
 
--- BULLETPROOF 64-BIT SESSION TOKEN EXTRACTION (CROSS-PLATFORM SAFE)
-local function extract_64bit_token(json_string)
-    -- Locate the key regardless of spacing or OS-specific JSON formatting
-    local key_start, key_end = json_string:find('"session_token"')
-    if not key_start then return nil end
-    
-    -- Snip everything after the key
-    local sub_str = json_string:sub(key_end + 1)
-    
-    -- Extract the first consecutive sequence of digits
-    local token_digits = sub_str:match("(%d+)")
-    if not token_digits then return nil end
-    
-    -- Convert securely to LuaJIT uint64_t cdata
-    return tonumber(token_digits .. "ULL")
-end
-
 local json = require("json_util") -- [JSON UTILS INJECTED]
-
 
 local MATCHMAKER_URL = "http://138.199.152.240:80"
 local STUN_SERVER = "138.199.152.240"
@@ -130,12 +114,23 @@ else
     print(string.format("[STUN] Discovery successful. External mapped endpoint: %s:%d", my_pub_ip, my_pub_port))
 end
 
+-- BULLETPROOF 64-BIT SESSION TOKEN EXTRACTION
+local function extract_true_64bit_token(json_string)
+    -- 1. Extract just the pure digits of the session token
+    local token_digits = json_string:match('"session_token"%s*:%s*(%d+)')
+    assert(token_digits, "FATAL: Could not locate session_token digits in JSON payload")
+
+    -- 2. Bypass Lua entirely. Have the native C library parse the string into a uint64_t
+    return ffi.C.strtoull(token_digits, nil, 10)
+end
+
+-- LOBBY & NETWORK EDGE DISCOVERY INITIALIZATION
 print("\n[MATCHMAKING] Select Mode: (H)ost New Game or (J)oin Existing Lobby")
 io.write("> ")
 local mode_input = io.read("*l"):upper()
 
 local lobby_id = ""
-local session_token = nil -- Now forced as an FFI cdata object
+local session_token = nil -- Will be a pure cdata<uint64_t>
 
 local payload_tbl = {
     public_ip = my_pub_ip,
@@ -149,13 +144,18 @@ if mode_input == "H" then
     print("[MATCHMAKER] Requesting new lobby...")
     local response = http_post(MATCHMAKER_URL .. "/host", initial_payload)
 
-    session_token = assert(extract_64bit_token(response), "FATAL: Failed to extract 64-bit token from Host response")
+    -- Extract 64-bit token natively via C
+    session_token = extract_true_64bit_token(response)
 
+    -- Decode the rest for the lobby ID
     local res_data = json.decode(response)
     lobby_id = res_data.lobby_id
+
     print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
 else
     if mode_input == "J" then
+        print("Enter Target 4-Character Lobby ID:")
+        io.write("> ")
         lobby_id = io.read("*l"):upper()
     else
         lobby_id = mode_input:upper()
@@ -164,9 +164,11 @@ else
     print("[MATCHMAKER] Joining Lobby: " .. lobby_id)
     local response = http_post(MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
 
-    session_token = assert(extract_64bit_token(response), "FATAL: Failed to extract 64-bit token from Join response")
+    -- Extract 64-bit token natively via C
+    session_token = extract_true_64bit_token(response)
 end
 
+-- POLLED SYNCHRONIZATION HOLD
 print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
 local status_data = nil
 
@@ -175,13 +177,14 @@ while true do
     if raw_res and raw_res ~= "" then
         status_data = json.decode(raw_res)
         if status_data.status == "locked" then
-            print("[MATCHMAKER] Quorum reached. Lobby is LOCKED.")
+            print(string.format("[MATCHMAKER] Quorum reached (%d/8). Lobby is LOCKED.", status_data.player_count))
             break
         end
     end
     sys_sleep(500)
 end
 
+-- Derive local ID
 local net_id_derived = 0
 for i, p in ipairs(status_data.players) do
     if p.ip == my_pub_ip and tonumber(p.port) == my_pub_port and p.local_ip == my_local_ip and p.local_port == local_port then
@@ -190,10 +193,11 @@ for i, p in ipairs(status_data.players) do
     end
 end
 
-local local_id = net_id_derived 
+local local_id = net_id_derived
 
+-- Inject the pure 64-bit FFI type directly into your C socket backend
 net.SetPlayerId(local_id)
-net.SetSession(session_token) -- FFI pushes pure 64-bit value to C backend
+net.SetSession(session_token) 
 
 print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
 
