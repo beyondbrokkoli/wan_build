@@ -1,38 +1,8 @@
 ========================================
- WEAVER ENGINE: 8-NODE DEEP HISTORY 
+ WEAVER ENGINE: 8-NODE WAN MATCHMAKING  
 ========================================
 Enter Node ID (0-7): 
-> [SYSTEM] Node 0 bound to :50000. Meshing topology...
-[SYSTEM] Topology Locked. Entering FSM loop.
-[HEARTBEAT] SimTick: 61 | NetHead: 60 | Confirmed: 14 | Missing: 47 | StateHash: 0x1911258C
-[HEARTBEAT] SimTick: 121 | NetHead: 120 | Confirmed: 75 | Missing: 46 | StateHash: 0x4348D945
-[HEARTBEAT] SimTick: 181 | NetHead: 180 | Confirmed: 135 | Missing: 46 | StateHash: 0xCEF5ADAC
-[HEARTBEAT] SimTick: 241 | NetHead: 240 | Confirmed: 195 | Missing: 46 | StateHash: 0x65BB6F25
-[HEARTBEAT] SimTick: 301 | NetHead: 300 | Confirmed: 254 | Missing: 47 | StateHash: 0xD13626DC
-[HEARTBEAT] SimTick: 361 | NetHead: 360 | Confirmed: 315 | Missing: 46 | StateHash: 0x7D08F545
-[HEARTBEAT] SimTick: 421 | NetHead: 420 | Confirmed: 375 | Missing: 46 | StateHash: 0x5FA082DC
-[HEARTBEAT] SimTick: 481 | NetHead: 480 | Confirmed: 435 | Missing: 46 | StateHash: 0xCA48CF55
-[HEARTBEAT] SimTick: 541 | NetHead: 540 | Confirmed: 495 | Missing: 46 | StateHash: 0x288D931C
-[HEARTBEAT] SimTick: 601 | NetHead: 600 | Confirmed: 555 | Missing: 46 | StateHash: 0xC453ED45
-[HEARTBEAT] SimTick: 661 | NetHead: 660 | Confirmed: 615 | Missing: 46 | StateHash: 0x4F52DF2C
-[HEARTBEAT] SimTick: 721 | NetHead: 720 | Confirmed: 675 | Missing: 46 | StateHash: 0x01FE1DB5
-[HEARTBEAT] SimTick: 781 | NetHead: 780 | Confirmed: 735 | Missing: 46 | StateHash: 0x4A8F0F6C
-[HEARTBEAT] SimTick: 841 | NetHead: 840 | Confirmed: 795 | Missing: 46 | StateHash: 0x2782E245
-[HEARTBEAT] SimTick: 901 | NetHead: 900 | Confirmed: 855 | Missing: 46 | StateHash: 0xFB9F201C
-[HEARTBEAT] SimTick: 961 | NetHead: 960 | Confirmed: 914 | Missing: 47 | StateHash: 0x148BF155
-[HEARTBEAT] SimTick: 1021 | NetHead: 1020 | Confirmed: 974 | Missing: 47 | StateHash: 0x076CAB5C
-[HEARTBEAT] SimTick: 1081 | NetHead: 1080 | Confirmed: 1035 | Missing: 46 | StateHash: 0x629B4305
-[HEARTBEAT] SimTick: 1142 | NetHead: 1141 | Confirmed: 1096 | Missing: 46 | StateHash: 0x0011A46C
-[HEARTBEAT] SimTick: 1202 | NetHead: 1201 | Confirmed: 1156 | Missing: 46 | StateHash: 0x9076F3F5
-[HEARTBEAT] SimTick: 1262 | NetHead: 1261 | Confirmed: 1216 | Missing: 46 | StateHash: 0xC077C16C
-[HEARTBEAT] SimTick: 1322 | NetHead: 1321 | Confirmed: 1276 | Missing: 46 | StateHash: 0xCA3B5745
-[HEARTBEAT] SimTick: 1382 | NetHead: 1381 | Confirmed: 1336 | Missing: 46 | StateHash: 0x567EEE7C
-[HEARTBEAT] SimTick: 1442 | NetHead: 1441 | Confirmed: 1396 | Missing: 46 | StateHash: 0x2C764CE5
-[HEARTBEAT] SimTick: 1502 | NetHead: 1501 | Confirmed: 1456 | Missing: 46 | StateHash: 0xBA6EF08C
-[HEARTBEAT] SimTick: 1562 | NetHead: 1561 | Confirmed: 1516 | Missing: 46 | StateHash: 0x76555E45
-luajit: ./lua/net_pump.lua:127: interrupted!
-stack traceback:
-	./lua/net_pump.lua:127: in function 'intercept_network'
-	./lua/fsm_core.lua:45: in function 'tick_playing_state'
-	main.lua:124: in main chunk
-	[C]: at 0x55b66141ee00
+> [SYSTEM] Local socket bound to 192.168.2.126:50000. Punching STUN...
+[SYSTEM] External Identity acquired: 93.220.127.30
+Enter 'H' to Host, or 'J' followed by Lobby ID to Join:
+> [MATCHMAKER] Requesting new lobby...

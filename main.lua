@@ -95,50 +95,70 @@ print("========================================")
 -- ============================================================================
 -- PHASE 2: BLOCKING SETUP & MATCHMAKING
 -- ============================================================================
-local MATCHMAKER_URL = "http://138.199.152.240:8000"
+local MATCHMAKER_URL = "http://138.199.152.240:80" -- Using port 80 from cursed build
+local STUN_SERVER = "138.199.152.240"
+local STUN_PORT = 3478
 
-print("Enter local port to bind (e.g., 50000): ")
+print("Enter Node ID (0-7) OR Preferred Local Port (e.g., 50000): ")
 io.write("> ")
-local local_port = tonumber(io.read("*l")) or 50000
+local user_input = tonumber(io.read("*l")) or 50000
 
-assert(net.Host(local_port), "FATAL: Failed to bind port " .. local_port)
+local local_port = user_input
+-- If the harness passed a single digit node ID (0-7), map it to the 50000 block
+if local_port < 1000 then
+    local_port = 50000 + local_port
+end
+
+assert(net.Host(local_port), "FATAL: Failed to bind local socket port " .. local_port)
 local my_local_ip = get_local_ip()
 
-print(string.format("[SYSTEM] Local socket bound to %s:%d. Punching STUN...", my_local_ip, local_port))
-local my_pub_ip = net.StunPunch() or my_local_ip
-print(string.format("[SYSTEM] External Identity acquired: %s", my_pub_ip))
+print(string.format("[STUN] Querying external NAT edges at %s:%d...", STUN_SERVER, STUN_PORT))
+local stun_ok, my_pub_ip, my_pub_port = net.StunPunch(STUN_SERVER, STUN_PORT)
 
-print("Enter 'H' to Host a new lobby, or paste a Lobby ID to Join:")
+if not stun_ok then
+    print("[WARNING] STUN negotiation failed. Operating via local loopbacks.")
+    my_pub_ip = my_local_ip
+    my_pub_port = local_port
+else
+    print(string.format("[STUN] Discovery successful. External mapped endpoint: %s:%d", my_pub_ip, my_pub_port))
+end
+
+print("\n[MATCHMAKING] Select Mode: (H)ost New Game or (J)oin Existing Lobby")
 io.write("> ")
-local user_input = io.read("*l")
+local mode_input = io.read("*l"):upper()
 
 local lobby_id = ""
 local session_token = 0
 
--- Pydantic Schema matches 'PlayerEndpoint'
 local payload_tbl = {
     public_ip = my_pub_ip,
-    public_port = local_port, -- Relay shotgun routing makes this best-effort
+    public_port = my_pub_port, -- Properly transmitting the NAT-scrambled port
     local_ip = my_local_ip,
     local_port = local_port
 }
 local initial_payload = json.encode(payload_tbl)
 
-if user_input:upper() == "H" then
+if mode_input == "H" then
     print("[MATCHMAKER] Requesting new lobby...")
     local response = http_post(MATCHMAKER_URL .. "/host", initial_payload)
     local res_data = json.decode(response)
     
     lobby_id = res_data.lobby_id
-    session_token = res_data.session_token -- Cached from initial creation
-    print("[MATCHMAKER] Hosted Lobby: " .. lobby_id)
+    session_token = res_data.session_token
+    
+    print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
 else
-    lobby_id = user_input
+    if mode_input == "J" then
+        lobby_id = io.read("*l"):upper()
+    else
+        lobby_id = mode_input:upper()
+    end
+    
     print("[MATCHMAKER] Joining Lobby: " .. lobby_id)
     local response = http_post(MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
     local res_data = json.decode(response)
     
-    session_token = res_data.session_token -- Cached from join sequence
+    session_token = res_data.session_token
 end
 
 print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
@@ -156,14 +176,16 @@ while true do
     sys_sleep(500)
 end
 
--- Derive local_id based on array position
-local local_id = 0
+-- Derive local_id based on tracking endpoints to identify our slot assignment
+local net_id_derived = 0
 for i, p in ipairs(status_data.players) do
-    if p.ip == my_pub_ip and p.local_ip == my_local_ip and p.local_port == local_port then
-        local_id = i - 1 -- Lua 1-index to Engine 0-index translation
+    if p.ip == my_pub_ip and tonumber(p.port) == my_pub_port and p.local_ip == my_local_ip and p.local_port == local_port then
+        net_id_derived = i - 1
         break
     end
 end
+
+local local_id = net_id_derived 
 
 net.SetPlayerId(local_id)
 net.SetSession(session_token)
@@ -188,7 +210,7 @@ for i, p in ipairs(status_data.players) do
             net.Connect(peer_id, p.local_ip, p.local_port)
             
         else
-            -- Tier 3: Guaranteed WAN (Hetzner UDP Relay)
+            -- Tier 3: Guaranteed WAN (Hetzner UDP Relay) - NO P2P HOLE PUNCHING
             print(string.format("[ROUTE] Node %d -> Hetzner UDP Relay (138.199.152.240:49152)", peer_id))
             net.Connect(peer_id, "138.199.152.240", 49152)
         end
