@@ -213,24 +213,14 @@ for i, p in ipairs(status_data.players) do
 end
 
 local local_id = net_id_derived
-
--- Inject the pure 64-bit FFI type directly into your C socket backend
 net.SetPlayerId(local_id)
 net.SetSession(session_token) 
 
 print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
--- ... Your existing matchmaker polling loop ...
-print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
-while true do
-    local raw_res = http_get(MATCHMAKER_URL .. "/status/" .. lobby_id)
-    -- Parse response, break when status == "locked" and we have the peer roster
-    if status == "locked" then break end
-    os.execute("sleep 1") -- Or your non-blocking loop sleep
-end
 
-print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
-
-print("[ICE] Quorum locked. Initiating Gleis 9 3/4 NAT Traversal...")
+-- =============================================================================
+-- [GLEIS 9 3/4] SYNCHRONIZED NAT TRAVERSAL & GLOBAL HOLD
+-- =============================================================================
 
 local p2p_established = {}
 local active_peers = {}
@@ -241,62 +231,62 @@ for i, p in ipairs(status_data.players) do
     if peer_id ~= local_id then
         active_peers[peer_id] = true
         
-        -- Smart target initialization (Catch loopback and LAN before they hit the open internet)
         if p.ip == my_pub_ip and p.local_ip == my_local_ip then
             net.Connect(peer_id, "127.0.0.1", tonumber(p.local_port))
-            p2p_established[peer_id] = true -- Instantly established
+            p2p_established[peer_id] = true
             print(string.format("[ICE] Node %d is local loopback. P2P bypassed.", peer_id))
-            
         elseif p.ip == my_pub_ip then
             net.Connect(peer_id, p.local_ip, tonumber(p.local_port))
-            p2p_established[peer_id] = true -- Instantly established
+            p2p_established[peer_id] = true
             print(string.format("[ICE] Node %d is on LAN. Hairpin bypassed.", peer_id))
-            
         else
-            -- Genuine WAN target: point the C-socket to their public STUN IP
+            -- Genuine WAN target: point C-socket to their public STUN IP
             net.Connect(peer_id, p.ip, tonumber(p.port))
         end
     end
 end
 
--- 2. Open the 5-Second P2P Hole Punching Window
-local P2P_WINDOW_SECS = 5.0
-local start_time = os.clock()
-print(string.format("[ICE] Blasting P2P tokens. Window open for %.1f seconds...", P2P_WINDOW_SECS))
+-- 2. Hole Punch DURING the Server-Mandated Global Sync Hold
+local real_time_remaining = status_data.start_time - status_data.server_time
+local sync_start_time = get_time_hires()
 
-local handshake_buffer = ffi.new("LockstepPacket[32]")
+if real_time_remaining > 0 then
+    print(string.format("[ICE] Quorum locked. Blasting P2P tokens for %.2f seconds...", real_time_remaining))
+    local handshake_buffer = ffi.new("LockstepPacket[32]")
 
-while (os.clock() - start_time) < P2P_WINDOW_SECS do
-    -- Send a handshake packet directly to all unverified WAN peers
-    for peer_id, active in pairs(active_peers) do
-        if active and not p2p_established[peer_id] then
-            local ping_pkt = ffi.new("LockstepPacket")
-            ping_pkt.session_token = session_token
-            ping_pkt.player_id = local_id
-            ping_pkt.frame_tick = 0 
-            
-            net.SendTo(ping_pkt, peer_id)
-        end
-    end
-
-    -- Flush the ingress socket to see if anyone punched through to us
-    local count = net.RecvAll(handshake_buffer, 32)
-    for i = 0, count - 1 do
-        local pkt = handshake_buffer[i]
-        if pkt.session_token == session_token and pkt.frame_tick == 0 then
-            if not p2p_established[pkt.player_id] then
-                p2p_established[pkt.player_id] = true
-                print(string.format("[ICE] P2P Direct Punch-Through SUCCESS for Node %d!", pkt.player_id))
+    -- Replaced os.clock() with get_time_hires() for accurate wall-clock traversal
+    while (get_time_hires() - sync_start_time) < real_time_remaining do
+        
+        -- Send a handshake ping directly to all unverified WAN peers
+        for peer_id, active in pairs(active_peers) do
+            if active and not p2p_established[peer_id] then
+                local ping_pkt = ffi.new("LockstepPacket")
+                ping_pkt.session_token = session_token
+                ping_pkt.player_id = local_id
+                ping_pkt.frame_tick = 0 
+                
+                net.SendTo(ping_pkt, peer_id)
             end
         end
-    end
 
-    -- Use your native sys_sleep so we don't burn 100% CPU on the while loop
-    sys_sleep(50) 
+        -- Flush ingress to see if anyone punched through to us
+        local count = net.RecvAll(handshake_buffer, 32)
+        for i = 0, count - 1 do
+            local pkt = handshake_buffer[i]
+            if pkt.session_token == session_token and pkt.frame_tick == 0 then
+                if not p2p_established[pkt.player_id] then
+                    p2p_established[pkt.player_id] = true
+                    print(string.format("[ICE] P2P Direct Punch-Through SUCCESS for Node %d!", pkt.player_id))
+                end
+            end
+        end
+
+        sys_sleep(50) -- Sleep safely without pausing the hires clock
+    end
 end
 
--- 3. Fallback Evaluation (The Magic Step)
-print("[ICE] Hole punching window closed. Evaluating routing topologies...")
+-- 3. Fallback Evaluation
+print("[ICE] Sync window closed. Evaluating routing topologies...")
 net.SetRelayIP("138.199.152.240") -- Protect the learned P2P routes from the relay
 
 for peer_id, active in pairs(active_peers) do
@@ -304,14 +294,16 @@ for peer_id, active in pairs(active_peers) do
         if p2p_established[peer_id] then
             print(string.format("[ROUTING] Node %d -> P2P [DIRECT RESIDENTIAL]", peer_id))
         else
-            -- Symmetric NAT or strict firewall detected. Force this specific slot to the relay!
             print(string.format("[ROUTING] Node %d -> P2P [FAILED]. Falling back to Hetzner Relay.", peer_id))
             net.Connect(peer_id, "138.199.152.240", 49152)
         end
     end
 end
 
-print("[SYSTEM] All routes bound. Executing global sync hold...")
+print("[SYSTEM] All routes bound. Drop-in complete.")
+
+-- Engine Data Setup
+-- local total_tiles = cfg.world.map_width * cfg.world.map_height ...
 
 -- =============================================================================
 -- (This connects seamlessly to your existing real_time_remaining logic below)
