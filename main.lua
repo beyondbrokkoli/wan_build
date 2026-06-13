@@ -1,5 +1,6 @@
 io.stdout:setvbuf("no")
 package.path = "./lua/?.lua;" .. package.path
+
 local ffi = require("ffi")
 local bit = require("bit")
 local structs = require("structs")
@@ -49,7 +50,6 @@ print(" WEAVER ENGINE: 8-NODE DEEP HISTORY ")
 print("========================================")
 print("Enter Node ID (0-7): ")
 io.write("> ")
-
 local user_input = io.read("*l")
 local local_id = tonumber(user_input) or 0
 local local_port = 50000 + local_id
@@ -82,8 +82,8 @@ local ctx = {
     rts_grid = State.init_grid(total_tiles),
     rollback_arena = ffi.new("RollbackBuffer"),
     snapshot_ring = {
-        terrain = ffi.new(string.format("uint16_t[128][8][%d]", total_tiles)),
-        elevation = ffi.new(string.format("float[128][8][%d]", total_tiles))
+        terrain = ffi.new(string.format("uint16_t[256][8][%d]", total_tiles)), -- [SCALE UP]
+        elevation = ffi.new(string.format("float[256][8][%d]", total_tiles))  -- [SCALE UP]
     }
 }
 
@@ -93,6 +93,7 @@ for p = 0, 7 do
     f0.click_grid_idx[p] = 65535
     f0.player_input[p] = 0
 end
+
 ctx.rollback_arena.head_tick = 0
 ctx.rollback_arena.confirmed_tick = 0
 
@@ -102,9 +103,9 @@ for p = 0, 7 do
     end
 end
 
--- [FIX]: Frame 0 Snapshot Initialization
 ffi.copy(ctx.snapshot_ring.terrain[0], ctx.rts_grid.terrain, bytes_terrain)
 ffi.copy(ctx.snapshot_ring.elevation[0], ctx.rts_grid.elevation, bytes_elevation)
+
 local h0_terrain = net.HashState(ctx.rts_grid.terrain, bytes_terrain, 0)
 f0.state_checksum = net.HashState(ctx.rts_grid.elevation, bytes_elevation, h0_terrain)
 
@@ -114,17 +115,16 @@ local last_time = get_time_hires()
 local next_debug_print = last_time + 1.0
 
 print("[SYSTEM] Topology Locked. Entering FSM loop.")
-
 while true do
     local current_time = get_time_hires()
     local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
     last_time = current_time
-    ctx.accumulator = ctx.accumulator + frame_time
     
+    ctx.accumulator = ctx.accumulator + frame_time
     FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
     
     if current_time >= next_debug_print then
-        local display_idx = bit.band(ctx.sim_tick_count - 1, 127)
+        local display_idx = bit.band(ctx.sim_tick_count - 1, 255) -- [SCALE UP]
         local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
         local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
         

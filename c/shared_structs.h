@@ -19,8 +19,8 @@ typedef struct {
     uint8_t player_id;
     uint8_t history_count;
     uint16_t _align_pad;
-    uint32_t clicks[64];
-    uint8_t inputs[64];
+    uint32_t clicks[128];
+    uint8_t inputs[128];
 } LockstepPacket;
 #pragma pack(pop)
 
@@ -43,7 +43,7 @@ typedef struct __attribute__((packed, aligned(64))) {
     uint8_t _pad_auto_0[3];
     uint32_t rollback_target;
     uint8_t _pad_auto_1[44];
-    NetworkFrame frames[128];
+    NetworkFrame frames[256];
     uint8_t _pad_tail[4];
 } RollbackBuffer;
 

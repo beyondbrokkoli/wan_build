@@ -1,4 +1,3 @@
--- lua/structs.lua
 local ffi = require("ffi")
 local M = {}
 
@@ -16,8 +15,6 @@ local function get_base_size(type_str)
     if string.find(type_str, "32") or type_str == "float" then return 4 end
     if string.find(type_str, "16") then return 2 end
     if string.find(type_str, "8") then return 1 end
-    -- If it's a nested struct, look up its compiled size
-    if struct_sizes[type_str] then return struct_sizes[type_str] end
     error("[FATAL] Unknown type size requested in SSoT Generator: " .. tostring(type_str))
 end
 
@@ -33,9 +30,9 @@ M.specs = {
             { type = "uint32_t", name = "base_tick" },
             { type = "uint8_t", name = "player_id" },
             { type = "uint8_t", name = "history_count" },
-            { type = "uint16_t", name = "_align_pad" }, 
-            { type = "uint32_t", name = "clicks", count = 64 },
-            { type = "uint8_t", name = "inputs", count = 64 }
+            { type = "uint16_t", name = "_align_pad" },
+            { type = "uint32_t", name = "clicks", count = 128 }, -- [SCALE UP]
+            { type = "uint8_t", name = "inputs", count = 128 }   -- [SCALE UP]
         }
     },
     {
@@ -57,34 +54,28 @@ M.specs = {
             { type = "uint32_t", name = "confirmed_tick" },
             { type = "uint8_t", name = "is_rollback_active" },
             { type = "uint32_t", name = "rollback_target" },
-            { type = "NetworkFrame", name = "frames", count = 128 }
+            { type = "NetworkFrame", name = "frames", count = 256 } -- [SCALE UP]
         }
     }
 }
 
 local cdef_builder = ""
-
 for _, struct in ipairs(M.specs) do
     local attr = struct.force_align and "__attribute__((packed, aligned("..struct.align..")))" or "__attribute__((packed))"
     cdef_builder = cdef_builder .. string.format("typedef struct %s {\n", attr)
-    
     local offset = 0
     local pad_id = 0
-
     for _, m in ipairs(struct.members) do
         local m_size = get_base_size(m.type)
-
-        -- Bypass auto-padding for strict UDP wire payloads
         if not struct.wire_format then
             local rem = offset % m_size
             if rem ~= 0 then
                 local pad_bytes = m_size - rem
-                cdef_builder = cdef_builder .. string.format("    uint8_t _pad_%d[%d];\n", pad_id, pad_bytes)
+                cdef_builder = cdef_builder .. string.format(" uint8_t _pad_%d[%d];\n", pad_id, pad_bytes)
                 offset = offset + pad_bytes
                 pad_id = pad_id + 1
             end
         end
-
         local arr = ""
         local element_count = 1
         if type(m.count) == "table" then
@@ -96,30 +87,23 @@ for _, struct in ipairs(M.specs) do
             arr = string.format("[%d]", m.count)
             element_count = m.count
         end
-
-        cdef_builder = cdef_builder .. string.format("    %s %s%s;\n", m.type, m.name, arr)
-
-        -- Determine struct sizing for nested calculations
+        cdef_builder = cdef_builder .. string.format(" %s %s%s;\n", m.type, m.name, arr)
         local real_size = m_size * element_count
         if struct_sizes[m.type] then
-             real_size = struct_sizes[m.type] * element_count
+            real_size = struct_sizes[m.type] * element_count
         end
         offset = offset + real_size
     end
-
     if not struct.wire_format then
         local tail_rem = offset % struct.align
         if tail_rem ~= 0 then
             local tail_pad = struct.align - tail_rem
-            cdef_builder = cdef_builder .. string.format("    uint8_t _pad_tail[%d];\n", tail_pad)
+            cdef_builder = cdef_builder .. string.format(" uint8_t _pad_tail[%d];\n", tail_pad)
             offset = offset + tail_pad
         end
     end
-
     cdef_builder = cdef_builder .. "} " .. struct.name .. ";\n\n"
     struct_sizes[struct.name] = offset
 end
-
 ffi.cdef(cdef_builder)
-
 return M
