@@ -56,14 +56,26 @@ function Pump.send_dynamic_history(ctx)
     end
 end
 
+
+
+-- [CRITICAL FIX]: Allocate the burst buffer ONCE at the top of the file
+local MAX_BURST_PACKETS = 256
+local global_in_buffer = ffi.new("LockstepPacket[?]", MAX_BURST_PACKETS)
+
 function Pump.intercept_network(ctx, current_tick)
-    local in_buffer = ffi.new("LockstepPacket[256]")
-    local count = net.RecvAll(in_buffer, 256)
+    -- Drain the OS buffer directly into persistent memory
+    local count = net.RecvAll(global_in_buffer, MAX_BURST_PACKETS)
 
     for i = 0, count - 1 do
-        local pkt = in_buffer[i]
+        local pkt = global_in_buffer[i]
         local pid = pkt.player_id
         
+        -- [QUICK REJECT]: If the packet is older than our confirmed tick, drop it immediately 
+        -- to save CPU cycles from iterating 128 history frames of dead data.
+        if pkt.frame_tick < ctx.rollback_arena.confirmed_tick then
+            goto continue_inbox
+        end
+
         if pid < 8 and pkt.frame_tick >= 0 and ctx.peer_active[pid] then -- [SCALE UP] MANDATORY: Block unauthorized peers
             if pkt.ack_tick > peer_ack_of_me[pid] then
                 peer_ack_of_me[pid] = pkt.ack_tick

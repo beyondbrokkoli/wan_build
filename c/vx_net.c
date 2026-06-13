@@ -59,6 +59,13 @@ static struct {
     .local_id = 0
 };
 
+// Track the centralized WAN proxy so we don't clobber P2P addresses with it
+static uint32_t g_relay_ip_addr = 0;
+
+EXPORT void vx_net_set_relay_ip(const char* ip) {
+    if (ip) g_relay_ip_addr = inet_addr(ip);
+}
+
 static inline int net_set_nonblocking(int sock) {
 #if defined(_WIN32)
     u_long mode = 1;
@@ -121,6 +128,11 @@ EXPORT int vx_net_host(int port) {
 #else
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
+
+    // [CRITICAL WAN PATCH]: Demand 1MB Kernel Buffers to prevent local packet drops during latency spikes
+    int buf_size = 1024 * 1024;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (const char*)&buf_size, sizeof(buf_size));
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (const char*)&buf_size, sizeof(buf_size));
 
     if (net_set_nonblocking(sock) < 0) {
         NET_CLOSE(sock);
@@ -205,9 +217,9 @@ EXPORT int vx_net_recv_all(LockstepPacket* out_buffer, int max_count) {
         if (recvd == sizeof(LockstepPacket)) {
             if (out_buffer[count].session_token != g_net.session_token) continue;
 
-            // UDP Pivot Hack: Learn IPs on the fly
+            // UDP Pivot Hack: Learn IPs on the fly, BUT IGNORE THE RELAY
             uint8_t pid = out_buffer[count].player_id;
-            if (pid < 8) {
+            if (pid < 8 && from.sin_addr.s_addr != g_relay_ip_addr) {
                 g_net.peers[pid].addr = from;
                 g_net.peers[pid].addr_len = from_len;
                 g_net.peers[pid].active = 1;

@@ -116,14 +116,14 @@ end
 local function extract_true_64bit_token(json_string)
     local token_digits = json_string:match('"session_token"%s*:%s*(%d+)')
     assert(token_digits, "FATAL: Could not locate session_token digits in JSON payload")
-    
+
     -- Initialize a pure 64-bit unsigned integer at 0
     local val = ffi.cast("uint64_t", 0)
-    
+
     -- Iterate through the ascii bytes of the string manually
     for i = 1, #token_digits do
         local byte = string.byte(token_digits, i)
-        
+
         if byte >= 48 and byte <= 57 then -- If char is '0' to '9'
             -- Shift current value by a base of 10, then add the new digit
             val = (val * 10) + (byte - 48)
@@ -131,7 +131,7 @@ local function extract_true_64bit_token(json_string)
             break
         end
     end
-    
+
     return val
 end
 
@@ -178,6 +178,14 @@ else
     -- Extract 64-bit token natively via C
     session_token = extract_true_64bit_token(response)
 end
+
+-- Protect the C-routing table from the relay
+net.SetRelayIP("138.199.152.240")
+
+-- [THE SOCKET DRAIN TRAP]
+-- Allocate enough contiguous memory to drain a massive WAN spike in a single frame
+local MAX_BURST_PACKETS = 256
+local incoming_packets = ffi.new("LockstepPacket[?]", MAX_BURST_PACKETS)
 
 -- POLLED SYNCHRONIZATION HOLD
 print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
