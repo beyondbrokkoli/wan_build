@@ -295,6 +295,14 @@ while true do
         local display_idx = bit.band(ctx.sim_tick_count - 1, 255) -- [SCALE UP PRESERVED]
         local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
         local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
+        -- Add this right above the print(string.format("[HEARTBEAT]..."))
+        local tracker_str = ""
+        for p = 0, 7 do
+            if p ~= ctx.net_identity then
+                tracker_str = tracker_str .. string.format("P%d:%d ", p, ctx.peer_highest_tick[p])
+            end
+        end
+        print("[DIAGNOSTIC] Peer Ticks: " .. tracker_str)
 
         print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X",
             ctx.sim_tick_count,
