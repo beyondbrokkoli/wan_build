@@ -1,8 +1,0 @@
-========================================
- WEAVER ENGINE: 8-NODE WAN MATCHMAKING  
-========================================
-Enter Node ID (0-7): 
-> [SYSTEM] Local socket bound to 192.168.2.126:50000. Punching STUN...
-[SYSTEM] External Identity acquired: 93.220.127.30
-Enter 'H' to Host, or 'J' followed by Lobby ID to Join:
-> [MATCHMAKER] Requesting new lobby...
