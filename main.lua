@@ -95,7 +95,7 @@ print("========================================")
 -- ============================================================================
 -- PHASE 2: BLOCKING SETUP & MATCHMAKING
 -- ============================================================================
-local MATCHMAKER_URL = "http://138.199.152.240:80" -- Using port 80 from cursed build
+local MATCHMAKER_URL = "http://138.199.152.240:80"
 local STUN_SERVER = "138.199.152.240"
 local STUN_PORT = 3478
 
@@ -104,7 +104,6 @@ io.write("> ")
 local user_input = tonumber(io.read("*l")) or 50000
 
 local local_port = user_input
--- If the harness passed a single digit node ID (0-7), map it to the 50000 block
 if local_port < 1000 then
     local_port = 50000 + local_port
 end
@@ -128,11 +127,11 @@ io.write("> ")
 local mode_input = io.read("*l"):upper()
 
 local lobby_id = ""
-local session_token = 0
+local session_token = nil -- Now forced as an FFI cdata object
 
 local payload_tbl = {
     public_ip = my_pub_ip,
-    public_port = my_pub_port, -- Properly transmitting the NAT-scrambled port
+    public_port = my_pub_port,
     local_ip = my_local_ip,
     local_port = local_port
 }
@@ -141,10 +140,13 @@ local initial_payload = json.encode(payload_tbl)
 if mode_input == "H" then
     print("[MATCHMAKER] Requesting new lobby...")
     local response = http_post(MATCHMAKER_URL .. "/host", initial_payload)
-    local res_data = json.decode(response)
     
+    -- [CRITICAL FIX]: Rip the 64-bit int out as a string before JSON truncates it
+    local raw_token_str = response:match('"session_token"%s*:%s*(%d+)')
+    session_token = ffi.cast("uint64_t", raw_token_str .. "ULL")
+    
+    local res_data = json.decode(response)
     lobby_id = res_data.lobby_id
-    session_token = res_data.session_token
     
     print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
 else
@@ -156,9 +158,10 @@ else
     
     print("[MATCHMAKER] Joining Lobby: " .. lobby_id)
     local response = http_post(MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
-    local res_data = json.decode(response)
     
-    session_token = res_data.session_token
+    -- [CRITICAL FIX]: Apply strict FFI casting to the join response as well
+    local raw_token_str = response:match('"session_token"%s*:%s*(%d+)')
+    session_token = ffi.cast("uint64_t", raw_token_str .. "ULL")
 end
 
 print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
@@ -176,7 +179,6 @@ while true do
     sys_sleep(500)
 end
 
--- Derive local_id based on tracking endpoints to identify our slot assignment
 local net_id_derived = 0
 for i, p in ipairs(status_data.players) do
     if p.ip == my_pub_ip and tonumber(p.port) == my_pub_port and p.local_ip == my_local_ip and p.local_port == local_port then
@@ -188,7 +190,7 @@ end
 local local_id = net_id_derived 
 
 net.SetPlayerId(local_id)
-net.SetSession(session_token)
+net.SetSession(session_token) -- FFI pushes pure 64-bit value to C backend
 
 -- ============================================================================
 -- PHASE 3: 3-TIER ABSOLUTE MESH ROUTING
