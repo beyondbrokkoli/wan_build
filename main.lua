@@ -132,9 +132,11 @@ if mode_input == "H" then
     print("[MATCHMAKER] Requesting new lobby...")
     local response = http_post(MATCHMAKER_URL .. "/host", initial_payload)
     
-    -- [CRITICAL FIX]: Rip the 64-bit int out as a string before JSON truncates it
+    -- [THE REAL FIX]
     local raw_token_str = response:match('"session_token"%s*:%s*(%d+)')
-    session_token = ffi.cast("uint64_t", raw_token_str .. "ULL")
+
+    -- tonumber() natively parses "ULL" strings into cdata<uint64_t> without losing precision
+    session_token = tonumber(raw_token_str .. "ULL")
     
     local res_data = json.decode(response)
     lobby_id = res_data.lobby_id
