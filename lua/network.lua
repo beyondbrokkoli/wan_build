@@ -8,6 +8,7 @@ ffi.cdef[[
     void vx_net_set_player_id(uint8_t id);
     void vx_net_send_to(void* pkt, uint8_t target_peer);
     int vx_net_recv_all(void* out_buffer, int max_count);
+    void vx_net_set_relay_ip(const char* ip);
     uint32_t vx_net_hash_state(const void* data, size_t length, uint32_t initial_hash);
     int vx_net_stun_punch(const char* stun_server_ip, int stun_port, char* out_ip, int* out_port);
 ]]
@@ -50,6 +51,10 @@ function Network.StunPunch(stun_ip, stun_port)
         return true, ffi.string(out_ip), out_port[0]
     end
     return false, "0.0.0.0", 0
+end
+
+function Network.SetRelayIP(ip)
+    net_lib.vx_net_set_relay_ip(ip)
 end
 
 function Network.HashState(data_ptr, length, initial_hash)
