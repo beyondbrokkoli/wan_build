@@ -83,6 +83,23 @@ local function get_local_ip()
     return res
 end
 
+-- BULLETPROOF 64-BIT SESSION TOKEN EXTRACTION (CROSS-PLATFORM SAFE)
+local function extract_64bit_token(json_string)
+    -- Locate the key regardless of spacing or OS-specific JSON formatting
+    local key_start, key_end = json_string:find('"session_token"')
+    if not key_start then return nil end
+    
+    -- Snip everything after the key
+    local sub_str = json_string:sub(key_end + 1)
+    
+    -- Extract the first consecutive sequence of digits
+    local token_digits = sub_str:match("(%d+)")
+    if not token_digits then return nil end
+    
+    -- Convert securely to LuaJIT uint64_t cdata
+    return tonumber(token_digits .. "ULL")
+end
+
 local json = require("json_util") -- [JSON UTILS INJECTED]
 
 
@@ -131,16 +148,11 @@ local initial_payload = json.encode(payload_tbl)
 if mode_input == "H" then
     print("[MATCHMAKER] Requesting new lobby...")
     local response = http_post(MATCHMAKER_URL .. "/host", initial_payload)
-    
-    -- [THE REAL FIX]
-    local raw_token_str = response:match('"session_token"%s*:%s*(%d+)')
 
-    -- tonumber() natively parses "ULL" strings into cdata<uint64_t> without losing precision
-    session_token = tonumber(raw_token_str .. "ULL")
-    
+    session_token = assert(extract_64bit_token(response), "FATAL: Failed to extract 64-bit token from Host response")
+
     local res_data = json.decode(response)
     lobby_id = res_data.lobby_id
-    
     print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
 else
     if mode_input == "J" then
@@ -148,13 +160,11 @@ else
     else
         lobby_id = mode_input:upper()
     end
-    
+
     print("[MATCHMAKER] Joining Lobby: " .. lobby_id)
     local response = http_post(MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
-    
-    -- [CRITICAL FIX]: Apply strict FFI casting to the join response as well
-    local raw_token_str = response:match('"session_token"%s*:%s*(%d+)')
-    session_token = ffi.cast("uint64_t", raw_token_str .. "ULL")
+
+    session_token = assert(extract_64bit_token(response), "FATAL: Failed to extract 64-bit token from Join response")
 end
 
 print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
