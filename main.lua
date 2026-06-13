@@ -114,14 +114,27 @@ else
     print(string.format("[STUN] Discovery successful. External mapped endpoint: %s:%d", my_pub_ip, my_pub_port))
 end
 
--- BULLETPROOF 64-BIT SESSION TOKEN EXTRACTION
+-- BULLETPROOF 64-BIT SESSION TOKEN EXTRACTION (ZERO C-RUNTIME DEPENDENCY)
 local function extract_true_64bit_token(json_string)
-    -- 1. Extract just the pure digits of the session token
     local token_digits = json_string:match('"session_token"%s*:%s*(%d+)')
     assert(token_digits, "FATAL: Could not locate session_token digits in JSON payload")
-
-    -- 2. Bypass Lua entirely. Have the native C library parse the string into a uint64_t
-    return ffi.C.strtoull(token_digits, nil, 10)
+    
+    -- Initialize a pure 64-bit unsigned integer at 0
+    local val = ffi.cast("uint64_t", 0)
+    
+    -- Iterate through the ascii bytes of the string manually
+    for i = 1, #token_digits do
+        local byte = string.byte(token_digits, i)
+        
+        if byte >= 48 and byte <= 57 then -- If char is '0' to '9'
+            -- Shift current value by a base of 10, then add the new digit
+            val = (val * 10) + (byte - 48)
+        else
+            break
+        end
+    end
+    
+    return val
 end
 
 -- LOBBY & NETWORK EDGE DISCOVERY INITIALIZATION
