@@ -16,8 +16,6 @@ ffi.cdef[[
     int QueryPerformanceFrequency(int64_t *lpFrequency);
     typedef struct { long tv_sec; long tv_nsec; } timespec;
     int clock_gettime(int clk_id, timespec *tp);
-
-    uint64_t strtoull(const char *nptr, char **endptr, int base);
 ]]
 
 local function sys_sleep(ms)
