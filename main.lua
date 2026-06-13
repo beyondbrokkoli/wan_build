@@ -18,9 +18,6 @@ ffi.cdef[[
     int clock_gettime(int clk_id, timespec *tp);
 ]]
 
--- ============================================================================
--- PHASE 1: HTTP & IP HELPERS
--- ============================================================================
 local function sys_sleep(ms)
     if jit.os == "Windows" then
         ffi.C.Sleep(ms)
@@ -88,13 +85,7 @@ end
 
 local json = require("json_util") -- [JSON UTILS INJECTED]
 
-print("========================================")
-print(" WEAVER ENGINE: 8-NODE WAN MATCHMAKING  ")
-print("========================================")
 
--- ============================================================================
--- PHASE 2: BLOCKING SETUP & MATCHMAKING
--- ============================================================================
 local MATCHMAKER_URL = "http://138.199.152.240:80"
 local STUN_SERVER = "138.199.152.240"
 local STUN_PORT = 3478
@@ -192,9 +183,6 @@ local local_id = net_id_derived
 net.SetPlayerId(local_id)
 net.SetSession(session_token) -- FFI pushes pure 64-bit value to C backend
 
--- ============================================================================
--- PHASE 3: 3-TIER ABSOLUTE MESH ROUTING
--- ============================================================================
 print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
 
 for i, p in ipairs(status_data.players) do
@@ -219,9 +207,7 @@ for i, p in ipairs(status_data.players) do
     end
 end
 
--- ============================================================================
--- PHASE 4: CLOCK SYNCHRONIZATION & PURE LOOP
--- ============================================================================
+
 -- Perfect sync: server_time and start_time arrive in the exact same HTTP response
 local real_time_remaining = status_data.start_time - status_data.server_time
 
