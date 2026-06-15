@@ -7,6 +7,7 @@ local structs = require("structs")
 local net = require("network")
 local cfg = require("config_engine")
 local FSM = require("fsm_core")
+local Pump = require("net_pump") -- [!] ADDED: Engine needs the pump here now
 local State = require("sim_world")
 
 ffi.cdef[[
@@ -369,35 +370,49 @@ local next_debug_print = last_time + 1.0
 
 print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
 
--- THE SACRED LOOP: Zero network polling, zero HTTP. Just math.
+print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
 while true do
     current_time = get_time_hires()
     local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
     last_time = current_time
 
+    -- 1. HARDWARE I/O [IN]: Drain OS sockets immediately. 
+    -- Fills the Rollback Arena and sets rollback flags *before* the FSM looks at them.
+    Pump.intercept_network(ctx, ctx.sim_tick_count)
+
+    -- 2. ACCUMULATE TIME
     ctx.accumulator = ctx.accumulator + frame_time
+
+    -- 3. LOGICAL SIMULATION
+    -- Will run 0 times (Hard Stall), 1 time (Normal), or N times (Fast-Forward).
+    -- Purely consumes the memory arrays populated by step 1.
     FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
 
+    -- 4. HARDWARE I/O [OUT]: Broadcast current state & dynamic history.
+    -- Crucial: This runs even if the FSM stalled (accumulator = 0), serving as a persistent heartbeat to un-stall peers.
+    Pump.send_dynamic_history(ctx)
+
     if current_time >= next_debug_print then
-        local display_idx = bit.band(ctx.sim_tick_count - 1, 255) -- [SCALE UP PRESERVED]
+        local display_idx = bit.band(ctx.sim_tick_count - 1, 255)
         local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
         local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
-        -- Add this right above the print(string.format("[HEARTBEAT]..."))
+        
         local tracker_str = ""
         for p = 0, 7 do
             if p ~= ctx.net_identity then
                 tracker_str = tracker_str .. string.format("P%d:%d ", p, ctx.peer_highest_tick[p])
             end
         end
+        
         print("[DIAGNOSTIC] Peer Ticks: " .. tracker_str)
-
-        print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X",
-            ctx.sim_tick_count,
-            ctx.rollback_arena.head_tick,
-            ctx.rollback_arena.confirmed_tick,
-            missing_frames,
+        print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X", 
+            ctx.sim_tick_count, 
+            ctx.rollback_arena.head_tick, 
+            ctx.rollback_arena.confirmed_tick, 
+            missing_frames, 
             display_checksum
         ))
+        
         next_debug_print = current_time + 1.0
     end
     sys_sleep(1)

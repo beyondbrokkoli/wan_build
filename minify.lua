@@ -88,8 +88,9 @@ local order = {
 --    "c/shared_structs.h",
 --    "c/vx_net.c",
 --    "lua/network.lua",
---    "lua/net_pump.lua",
---    "lua/fsm_core.lua",
+
+    "lua/fsm_core.lua",
+    "lua/net_pump.lua",
     "main.lua",
 --     [ C-CORE ]
 --    "c/main.c",
