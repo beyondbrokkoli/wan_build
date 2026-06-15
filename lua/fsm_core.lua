@@ -36,9 +36,9 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
         end
         frame.tick = ctx.sim_tick_count
 
-        -- [!] REMOVED: The entire "if ctx.pending_click ~= -1" block. 
+        -- [!] REMOVED: The entire "if ctx.pending_click ~= -1" block.
         -- The frame already contains the correct hardware inputs.
-        
+
         ctx.rollback_arena.head_tick = ctx.sim_tick_count
 
         -- ... (The rest of your rollback and State.update_simulation logic remains untouched)
@@ -50,41 +50,47 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
         if ctx.rollback_arena.is_rollback_active == 1 then
             local t_tgt = ctx.rollback_arena.rollback_target
             local r_idx = bit.band(t_tgt - 1, 255)
-            
+
             ffi.copy(ctx.rts_grid.terrain, ctx.snapshot_ring.terrain[r_idx], bytes_terrain)
             ffi.copy(ctx.rts_grid.elevation, ctx.snapshot_ring.elevation[r_idx], bytes_elevation)
-            
+            -- [!] ADDED: Restore the RNG state from the snapshot history
+            ffi.copy(ctx.rts_grid.rng_state, ctx.snapshot_ring.rng_state[r_idx], 4)
+
             for t = t_tgt, ctx.sim_tick_count - 1 do
                 local f_idx = bit.band(t, 255)
                 local f = ctx.rollback_arena.frames[f_idx]
                 State.update_simulation(ctx.rts_grid, t, f, 8)
-                
+
                 local h_terrain = net.HashState(ctx.rts_grid.terrain, bytes_terrain, 0)
                 f.state_checksum = net.HashState(ctx.rts_grid.elevation, bytes_elevation, h_terrain)
-                
+
                 ffi.copy(ctx.snapshot_ring.terrain[f_idx], ctx.rts_grid.terrain, bytes_terrain)
                 ffi.copy(ctx.snapshot_ring.elevation[f_idx], ctx.rts_grid.elevation, bytes_elevation)
+                -- [!] ADDED: Save the RNG state during catch-up execution
+                ffi.copy(ctx.snapshot_ring.rng_state[f_idx], ctx.rts_grid.rng_state, 4)
             end
             ctx.rollback_arena.is_rollback_active = 0
         end
 
         if ctx.sim_tick_count <= remote_highest + 100 then
             State.update_simulation(ctx.rts_grid, ctx.sim_tick_count, frame, 8)
-            
+
             local h_terrain = net.HashState(ctx.rts_grid.terrain, bytes_terrain, 0)
             frame.state_checksum = net.HashState(ctx.rts_grid.elevation, bytes_elevation, h_terrain)
-            
+
             ffi.copy(ctx.snapshot_ring.terrain[c_idx], ctx.rts_grid.terrain, bytes_terrain)
             ffi.copy(ctx.snapshot_ring.elevation[c_idx], ctx.rts_grid.elevation, bytes_elevation)
-            
+            -- [!] ADDED: Save the RNG state during live execution
+            ffi.copy(ctx.snapshot_ring.rng_state[c_idx], ctx.rts_grid.rng_state, 4)
+
             ctx.sim_tick_count = ctx.sim_tick_count + 1
             local conf_tick = ctx.rollback_arena.confirmed_tick
             local sweep_start = math.max(0, conf_tick - 60)
-            
+
             for v_tick = sweep_start, conf_tick do
                 local v_idx = bit.band(v_tick, 255)
                 local v_frame = ctx.rollback_arena.frames[v_idx]
-                
+
                 if v_frame.tick == v_tick and v_frame.state_checksum ~= 0 and v_frame.remote_checksum ~= 0 then
                     if v_frame.state_checksum ~= v_frame.remote_checksum then
                         print(string.format("[FATAL DESYNC] Tick: %d | Local: 0x%08X | Remote: 0x%08X", v_tick, v_frame.state_checksum, v_frame.remote_checksum))

@@ -9,9 +9,11 @@ local total_tiles = cfg.world.map_width * cfg.world.map_height
 
 function World.init_grid(total_tiles)
     local terrain = ffi.new(string.format("uint16_t[8][%d]", total_tiles))
-    -- We leave this as a float array. We will just store integers inside it.
     local elevation = ffi.new(string.format("float[8][%d]", total_tiles))
-    return { terrain = terrain, elevation = elevation }
+    -- [!] ADDED: The 4-byte RNG state now lives natively inside the game state
+    local rng_state = ffi.new("uint32_t[1]")
+
+    return { terrain = terrain, elevation = elevation, rng_state = rng_state }
 end
 
 function World.update_simulation(grid, tick, frame_data, player_count)
@@ -24,7 +26,7 @@ function World.update_simulation(grid, tick, frame_data, player_count)
             -- Toggle state based on player click
             if grid.terrain[p][click_idx] == 0 then
                 grid.terrain[p][click_idx] = p + 10
-                
+
                 -- [!] Store scaled integer (15360) directly inside the float memory space
                 grid.elevation[p][click_idx] = Fixed.from_float(15.0)
             else

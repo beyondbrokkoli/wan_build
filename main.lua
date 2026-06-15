@@ -319,9 +319,6 @@ if real_time_remaining > 0 then
     sys_sleep(real_time_remaining * 1000)
 end
 
--- [!] ADD THIS: Seed the global simulation RNG using the 64-bit match token
-RNG.seed(session_token)
-
 -- Engine Data Setup
 local total_tiles = cfg.world.map_width * cfg.world.map_height
 local bytes_terrain = 8 * total_tiles * ffi.sizeof("uint16_t")
@@ -340,8 +337,10 @@ local ctx = {
     rts_grid = State.init_grid(total_tiles),
     rollback_arena = ffi.new("RollbackBuffer"),
     snapshot_ring = {
-        terrain = ffi.new(string.format("uint16_t[256][8][%d]", total_tiles)), -- [SCALE UP PRESERVED]
-        elevation = ffi.new(string.format("float[256][8][%d]", total_tiles))  -- [SCALE UP PRESERVED]
+        terrain = ffi.new(string.format("uint16_t[256][8][%d]", total_tiles)),
+        elevation = ffi.new(string.format("float[256][8][%d]", total_tiles)),
+        -- [!] ADDED: 256 slots to perfectly track the RNG history
+        rng_state = ffi.new("uint32_t[256][1]")
     }
 }
 
@@ -361,8 +360,13 @@ for p = 0, 7 do
     end
 end
 
+-- [!] CHANGED: Seed the RNG into the RTS grid state
+RNG.seed(ctx.rts_grid.rng_state, session_token)
+
 ffi.copy(ctx.snapshot_ring.terrain[0], ctx.rts_grid.terrain, bytes_terrain)
 ffi.copy(ctx.snapshot_ring.elevation[0], ctx.rts_grid.elevation, bytes_elevation)
+-- [!] ADDED: Snapshot the initial RNG state for Tick 0
+ffi.copy(ctx.snapshot_ring.rng_state[0], ctx.rts_grid.rng_state, 4)
 
 local h0_terrain = net.HashState(ctx.rts_grid.terrain, bytes_terrain, 0)
 f0.state_checksum = net.HashState(ctx.rts_grid.elevation, bytes_elevation, h0_terrain)
