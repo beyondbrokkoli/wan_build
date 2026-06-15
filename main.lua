@@ -375,20 +375,6 @@ while true do
     local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
     last_time = current_time
 
-    -- Calculate the unconfirmed gap
-    local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
-
-    -- === [CRITICAL PATCH: ADAPTIVE PACING / TIME DILATION] ===
-    if missing_frames > 180 then
-        -- HARD STALL: We are dangerously close to the 240-tick limit. Freeze simulation.
-        frame_time = 0.0
-        print("[SYNC] WARNING: Hard stall engaged. Waiting for network to catch up...")
-    elseif missing_frames > 45 then
-        -- SOFT STALL: Time dilation. Run the engine at 50% speed.
-        -- This gives the cell phone client twice as much real-world time to send inputs.
-        frame_time = frame_time * 0.5
-    end
-
     ctx.accumulator = ctx.accumulator + frame_time
     FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
 
