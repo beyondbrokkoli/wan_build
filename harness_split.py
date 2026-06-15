@@ -15,13 +15,14 @@ def monitor_output(process, p_id):
             full_log.write(line)
             full_log.flush()
 
-            # Expanded filter to stop suppressing setup info and Lua errors
+            # Expanded filter to stop suppressing setup info, routing, and Lua errors
             important_tags = [
-                "[HEARTBEAT]", "FATAL", "Divergence", 
-                "[SYSTEM]", "[STUN]", "[LOBBY]", "[ICE]", "[SYNC]", 
+                "[HEARTBEAT]", "FATAL", "Divergence",
+                "[SYSTEM]", "[STUN]", "[LOBBY]", "[ICE]", "[SYNC]",
+                "[ROUTING]", "[MATCHMAKER]", "[DIAGNOSTIC]", # <-- ADDED THESE
                 "error", "Exception", "luajit:"
             ]
-            
+
             if any(tag in line for tag in important_tags):
                 with sync_lock:
                     formatted_line = f"[P{p_id}] {line}"
