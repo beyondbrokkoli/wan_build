@@ -8,11 +8,14 @@ local FSM = {}
 function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
     local remote_highest = ctx.rollback_arena.confirmed_tick
 
+    -- Fast-forward / Catch-up logic
     if remote_highest > ctx.sim_tick_count + 2 then
         ctx.accumulator = ctx.accumulator + ((remote_highest - ctx.sim_tick_count) * FIXED_DT)
     end
 
-    if ctx.sim_tick_count > remote_highest + 240 then
+    -- [!] FIX: The Hard Stall limit MUST be smaller than the struct's history_len max (128).
+    -- By capping it at 100, we guarantee we never "forget" the inputs the slow nodes need.
+    if ctx.sim_tick_count > remote_highest + 100 then
         ctx.accumulator = 0
     end
 
@@ -65,7 +68,7 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
             ctx.rollback_arena.is_rollback_active = 0
         end
 
-        if ctx.sim_tick_count <= remote_highest + 240 then
+        if ctx.sim_tick_count <= remote_highest + 100 then
             State.update_simulation(ctx.rts_grid, ctx.sim_tick_count, frame, 8)
             
             local h_terrain = net.HashState(ctx.rts_grid.terrain, bytes_terrain, 0)
