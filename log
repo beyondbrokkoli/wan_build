@@ -1,7 +1,26 @@
-[P1] [SYSTEM] Assigning Identity: Node 1. Meshing topology...
-[P1] [SYSTEM] Topology Locked. Sleeping 4.64 seconds for global sync...
-[P2] [SYSTEM] Assigning Identity: Node 2. Meshing topology...
-[P0] C:\msys64\mingw64\bin\luajit: ./lua/network.lua:30: bad argument #1 to 'vx_net_set_session' (cannot convert 'nil' to 'uint64_t')
-[P2] [SYSTEM] Topology Locked. Sleeping 4.63 seconds for global sync...
-[P1] [SYSTEM] Drop-in complete. Entering pristine FSM loop.
-[P3] [SYSTEM] Drop-in complete. Entering pristine FSM loop.
+#[P1] [HEARTBEAT] SimTick: 3374 | NetHead: 3373 | Confirmed: 3349 | Missing: 25 | StateHash: 0xDF8FC013
+[P0] [DIAGNOSTIC] Peer Ticks: P1:3373 P2:3372 P3:3373 P4:3379 P5:3351 P6:3365 P7:3349
+[P0] [HEARTBEAT] SimTick: 3374 | NetHead: 3373 | Confirmed: 3349 | Missing: 25 | StateHash: 0xDF8FC013
+[P3] [DIAGNOSTIC] Peer Ticks: P0:3393 P1:3394 P2:3393 P4:3401 P5:3373 P6:3387 P7:3372
+[P3] [HEARTBEAT] SimTick: 3395 | NetHead: 3394 | Confirmed: 3372 | Missing: 23 | StateHash: 0xE0E67226
+[P2] [DIAGNOSTIC] Peer Ticks: P0:3420 P1:3420 P3:3420 P4:3429 P5:3401 P6:3415 P7:3399
+[P2] [HEARTBEAT] SimTick: 3421 | NetHead: 3420 | Confirmed: 3399 | Missing: 22 | StateHash: 0xE1AF3757
+[P1] [DIAGNOSTIC] Peer Ticks: P0:3432 P2:3432 P3:3433 P4:3433 P5:3406 P6:3419 P7:3404
+[P1] [HEARTBEAT] SimTick: 3434 | NetHead: 3433 | Confirmed: 3404 | Missing: 30 | StateHash: 0xE1AF3757
+[P0] [DIAGNOSTIC] Peer Ticks: P1:3433 P2:3433 P3:3433 P4:3433 P5:3406 P6:3419 P7:3404
+[P0] [HEARTBEAT] SimTick: 3434 | NetHead: 3433 | Confirmed: 3404 | Missing: 30 | StateHash: 0xE1AF3757
+[P3] [DIAGNOSTIC] Peer Ticks: P0:3454 P1:3454 P2:3454 P4:3440 P5:3413 P6:3420 P7:3410
+[P3] [HEARTBEAT] SimTick: 3456 | NetHead: 3455 | Confirmed: 3410 | Missing: 46 | StateHash: 0xFAD19D14
+[P1] [FATAL DESYNC] Tick: 3420 | Local: 0xE1AF3757 | Remote: 0xFAD19D14
+[P2] [DIAGNOSTIC] Peer Ticks: P0:3470 P1:3461 P3:3472 P4:3459 P5:3431 P6:3452 P7:3429
+[P2] [HEARTBEAT] SimTick: 3476 | NetHead: 3475 | Confirmed: 3429 | Missing: 47 | StateHash: 0xFAD19D14
+[P0] [DIAGNOSTIC] Peer Ticks: P1:3461 P2:3481 P3:3480 P4:3461 P5:3433 P6:3458 P7:3432
+[P0] [HEARTBEAT] SimTick: 3481 | NetHead: 3480 | Confirmed: 3432 | Missing: 49 | StateHash: 0xA9A7130D
+[P3] [DIAGNOSTIC] Peer Ticks: P0:3498 P1:3461 P2:3499 P4:3504 P5:3476 P6:3490 P7:3475
+[P3] [HEARTBEAT] SimTick: 3501 | NetHead: 3500 | Confirmed: 3461 | Missing: 40 | StateHash: 0xA9A7130D
+[P2] [DIAGNOSTIC] Peer Ticks: P0:3515 P1:3461 P3:3516 P4:3513 P5:3492 P6:3499 P7:3481
+[P2] [HEARTBEAT] SimTick: 3517 | NetHead: 3516 | Confirmed: 3461 | Missing: 56 | StateHash: 0x3CD25574
+[P0] [DIAGNOSTIC] Peer Ticks: P1:3461 P2:3521 P3:3521 P4:3522 P5:3498 P6:3509 P7:3495
+[P0] [HEARTBEAT] SimTick: 3522 | NetHead: 3521 | Confirmed: 3461 | Missing: 61 | StateHash: 0x3CD25574
+[P3] [DIAGNOSTIC] Peer Ticks: P0:3532 P1:3461 P2:3532 P4:3538 P5:3518 P6:3525 P7:3516
+
