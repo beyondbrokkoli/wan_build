@@ -8,25 +8,27 @@ local Pump = {}
 local peer_ack_of_me = ffi.new("uint32_t[8]")
 
 function Pump.send_dynamic_history(ctx)
-    local current_tick = ctx.sim_tick_count
+    local current_tick = ctx.rollback_arena.head_tick
     local conf_tick = ctx.rollback_arena.confirmed_tick
 
     for p = 0, 7 do
         if p ~= ctx.net_identity and ctx.peer_active[p] then
             local pkt = ffi.new("LockstepPacket")
-            ffi.fill(pkt, ffi.sizeof("LockstepPacket"), 0) -- [SCALE UP] MANDATORY: Wipe 128-slot array garbage
-            
+            ffi.fill(pkt, ffi.sizeof("LockstepPacket"), 0)
+
             pkt.session_token = ctx.session_token
             pkt.player_id = ctx.net_identity
             pkt.frame_tick = current_tick
             pkt.ack_tick = ctx.peer_highest_tick[p]
 
-            if conf_tick > 0 then
-                local conf_idx = bit.band(conf_tick, 255) -- [SCALE UP]
+            -- [!] FIX: Only attach the checksum if the local state is completely clean and resolved.
+            if conf_tick > 0 and ctx.rollback_arena.is_rollback_active == 0 then
+                local conf_idx = bit.band(conf_tick, 255)
                 pkt.state_checksum = ctx.rollback_arena.frames[conf_idx].state_checksum
                 pkt.checksum_tick = conf_tick
             end
 
+            -- ... (rest of the history loop remains identical)
             local needed_base = peer_ack_of_me[p] + 1
             if needed_base == 1 then
                 needed_base = math.max(1, current_tick - 127) -- [SCALE UP]

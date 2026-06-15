@@ -8,6 +8,7 @@ local net = require("network")
 local cfg = require("config_engine")
 local FSM = require("fsm_core")
 local Pump = require("net_pump") -- [!] ADDED: Engine needs the pump here now
+local RNG = require("sim_rng")
 local State = require("sim_world")
 
 ffi.cdef[[
@@ -215,7 +216,7 @@ end
 
 local local_id = net_id_derived
 net.SetPlayerId(local_id)
-net.SetSession(session_token) 
+net.SetSession(session_token)
 
 print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
 
@@ -231,7 +232,7 @@ for i, p in ipairs(status_data.players) do
     local peer_id = i - 1
     if peer_id ~= local_id then
         active_peers[peer_id] = true
-        
+
         if p.ip == my_pub_ip and p.local_ip == my_local_ip then
             net.Connect(peer_id, "127.0.0.1", tonumber(p.local_port))
             p2p_established[peer_id] = true
@@ -257,15 +258,15 @@ if real_time_remaining > 0 then
 
     -- Replaced os.clock() with get_time_hires() for accurate wall-clock traversal
     while (get_time_hires() - sync_start_time) < real_time_remaining do
-        
+
         -- Send a handshake ping directly to all unverified WAN peers
         for peer_id, active in pairs(active_peers) do
             if active and not p2p_established[peer_id] then
                 local ping_pkt = ffi.new("LockstepPacket")
                 ping_pkt.session_token = session_token
                 ping_pkt.player_id = local_id
-                ping_pkt.frame_tick = 0 
-                
+                ping_pkt.frame_tick = 0
+
                 net.SendTo(ping_pkt, peer_id)
             end
         end
@@ -318,6 +319,9 @@ if real_time_remaining > 0 then
     sys_sleep(real_time_remaining * 1000)
 end
 
+-- [!] ADD THIS: Seed the global simulation RNG using the 64-bit match token
+RNG.seed(session_token)
+
 -- Engine Data Setup
 local total_tiles = cfg.world.map_width * cfg.world.map_height
 local bytes_terrain = 8 * total_tiles * ffi.sizeof("uint16_t")
@@ -369,50 +373,70 @@ local last_time = get_time_hires()
 local next_debug_print = last_time + 1.0
 
 print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
-
-print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
 while true do
     current_time = get_time_hires()
     local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
     last_time = current_time
 
-    -- 1. HARDWARE I/O [IN]: Drain OS sockets immediately. 
-    -- Fills the Rollback Arena and sets rollback flags *before* the FSM looks at them.
+    -- 1. HARDWARE I/O [IN]
     Pump.intercept_network(ctx, ctx.sim_tick_count)
 
-    -- 2. ACCUMULATE TIME
+    -- 2. HARDWARE I/O [LOCAL POLLING]
+    -- Ensure the current pending frame is safely initialized before broadcast
+    local c_idx = bit.band(ctx.sim_tick_count, 255)
+    local pending_frame = ctx.rollback_arena.frames[c_idx]
+
+    if pending_frame.tick ~= ctx.sim_tick_count then
+        pending_frame.tick = ctx.sim_tick_count
+        for p = 0, 7 do
+            pending_frame.player_input[p] = 0
+            pending_frame.click_grid_idx[p] = 65535
+        end
+        pending_frame.state_checksum = 0
+        pending_frame.remote_checksum = 0
+    end
+
+    -- Bot simulating an OS mouse click directly into the pending frame
+    if ctx.sim_tick_count % 120 == (ctx.net_identity * 10) then
+        if ctx.last_bot_tick ~= ctx.sim_tick_count then
+            -- We write directly to the hardware frame. No middleman needed.
+            pending_frame.click_grid_idx[ctx.net_identity] = math.random(0, ctx.total_tiles - 1)
+            ctx.last_bot_tick = ctx.sim_tick_count
+        end
+    end
+
+    -- 3. ACCUMULATE TIME
     ctx.accumulator = ctx.accumulator + frame_time
 
-    -- 3. LOGICAL SIMULATION
-    -- Will run 0 times (Hard Stall), 1 time (Normal), or N times (Fast-Forward).
-    -- Purely consumes the memory arrays populated by step 1.
+    -- 4. LOGICAL SIMULATION (Pure Consumer)
     FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
 
-    -- 4. HARDWARE I/O [OUT]: Broadcast current state & dynamic history.
-    -- Crucial: This runs even if the FSM stalled (accumulator = 0), serving as a persistent heartbeat to un-stall peers.
+    -- 5. HARDWARE I/O [OUT]
+    -- Now safely broadcasts cleanly initialized data, even if FSM stalled
     Pump.send_dynamic_history(ctx)
 
+    -- ... (Diagnostics logging remains exactly the same below here)
     if current_time >= next_debug_print then
         local display_idx = bit.band(ctx.sim_tick_count - 1, 255)
         local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
         local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
-        
+
         local tracker_str = ""
         for p = 0, 7 do
             if p ~= ctx.net_identity then
                 tracker_str = tracker_str .. string.format("P%d:%d ", p, ctx.peer_highest_tick[p])
             end
         end
-        
+
         print("[DIAGNOSTIC] Peer Ticks: " .. tracker_str)
-        print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X", 
-            ctx.sim_tick_count, 
-            ctx.rollback_arena.head_tick, 
-            ctx.rollback_arena.confirmed_tick, 
-            missing_frames, 
+        print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X",
+            ctx.sim_tick_count,
+            ctx.rollback_arena.head_tick,
+            ctx.rollback_arena.confirmed_tick,
+            missing_frames,
             display_checksum
         ))
-        
+
         next_debug_print = current_time + 1.0
     end
     sys_sleep(1)

@@ -2,35 +2,27 @@ local net = require("network")
 local State = require("sim_world")
 local bit = require("bit")
 local ffi = require("ffi")
-
+local RNG = require("sim_rng")
 local FSM = {}
 
 function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
     local remote_highest = ctx.rollback_arena.confirmed_tick
 
-    -- Fast-forward / Catch-up logic
     if remote_highest > ctx.sim_tick_count + 2 then
         ctx.accumulator = ctx.accumulator + ((remote_highest - ctx.sim_tick_count) * FIXED_DT)
     end
 
-    -- Hard stall logic (Network dependency)
     if ctx.sim_tick_count > remote_highest + 240 then
         ctx.accumulator = 0
     end
 
-    -- Pending bot input (for testing)
-    if ctx.sim_tick_count % 120 == (ctx.net_identity * 10) then
-        if ctx.last_bot_tick ~= ctx.sim_tick_count then
-            ctx.pending_click = math.random(0, ctx.total_tiles - 1)
-            ctx.last_bot_tick = ctx.sim_tick_count
-        end
-    end
+    -- [!] REMOVED: The entire "if ctx.sim_tick_count % 120 == ..." bot block.
 
-    -- Pure Simulation Loop (Consumes Rollback Arena)
     while ctx.accumulator >= FIXED_DT do
         local c_idx = bit.band(ctx.sim_tick_count, 255)
         local frame = ctx.rollback_arena.frames[c_idx]
 
+        -- Keep this! It initializes future frames during fast-forwards.
         if frame.tick ~= ctx.sim_tick_count then
             for p = 0, 7 do
                 frame.player_input[p] = 0
@@ -41,12 +33,12 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
         end
         frame.tick = ctx.sim_tick_count
 
-        if ctx.pending_click ~= -1 then
-            frame.click_grid_idx[ctx.net_identity] = ctx.pending_click
-            ctx.pending_click = -1
-        end
+        -- [!] REMOVED: The entire "if ctx.pending_click ~= -1" block. 
+        -- The frame already contains the correct hardware inputs.
         
         ctx.rollback_arena.head_tick = ctx.sim_tick_count
+
+        -- ... (The rest of your rollback and State.update_simulation logic remains untouched)
 
         -- [!] REMOVED: Pump.send_dynamic_history(ctx)
         -- [!] REMOVED: Pump.intercept_network(ctx, ctx.sim_tick_count)
