@@ -376,17 +376,17 @@ local FIXED_DT = 1.0 / TICK_RATE
 local last_time = get_time_hires()
 local next_debug_print = last_time + 1.0
 
+-- ... (Everything prior to the pristine FSM loop remains untouched)
+
 print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
+
 while true do
     current_time = get_time_hires()
     local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
     last_time = current_time
 
-    -- 1. HARDWARE I/O [IN]
     Pump.intercept_network(ctx, ctx.sim_tick_count)
 
-    -- 2. HARDWARE I/O [LOCAL POLLING]
-    -- Ensure the current pending frame is safely initialized before broadcast
     local c_idx = bit.band(ctx.sim_tick_count, 255)
     local pending_frame = ctx.rollback_arena.frames[c_idx]
 
@@ -398,40 +398,36 @@ while true do
         end
         pending_frame.state_checksum = 0
         pending_frame.remote_checksum = 0
+        -- [FIX: BUG 4] Complete initialization of the frame for hardware polling
+        pending_frame.state = 0
+        pending_frame.remote_peer_id = 0
     end
 
-    -- Bot simulating an OS mouse click directly into the pending frame
     if ctx.sim_tick_count % 120 == (ctx.net_identity * 10) then
         if ctx.last_bot_tick ~= ctx.sim_tick_count then
-            -- We write directly to the hardware frame. No middleman needed.
+            -- [FALSE POSITIVE: BUG 7] math.random is completely fine here. It acts as the "human hardware click", not internal FSM logic.
             pending_frame.click_grid_idx[ctx.net_identity] = math.random(0, ctx.total_tiles - 1)
             ctx.last_bot_tick = ctx.sim_tick_count
         end
     end
 
-    -- 3. ACCUMULATE TIME
     ctx.accumulator = ctx.accumulator + frame_time
-
-    -- 4. LOGICAL SIMULATION (Pure Consumer)
     FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
 
-    -- 5. HARDWARE I/O [OUT]
-    -- Now safely broadcasts cleanly initialized data, even if FSM stalled
     Pump.send_dynamic_history(ctx)
 
-    -- ... (Diagnostics logging remains exactly the same below here)
     if current_time >= next_debug_print then
         local display_idx = bit.band(ctx.sim_tick_count - 1, 255)
         local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
         local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
-
+        
         local tracker_str = ""
         for p = 0, 7 do
             if p ~= ctx.net_identity then
                 tracker_str = tracker_str .. string.format("P%d:%d ", p, ctx.peer_highest_tick[p])
             end
         end
-
+        
         print("[DIAGNOSTIC] Peer Ticks: " .. tracker_str)
         print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X",
             ctx.sim_tick_count,
@@ -440,7 +436,7 @@ while true do
             missing_frames,
             display_checksum
         ))
-
+        
         next_debug_print = current_time + 1.0
     end
     sys_sleep(1)

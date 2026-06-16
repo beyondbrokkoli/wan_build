@@ -3,29 +3,41 @@ local State = require("sim_world")
 local bit = require("bit")
 local ffi = require("ffi")
 local RNG = require("sim_rng")
+
 local FSM = {}
 
 function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
+    -- [FIX: BUG 2] Calculate consensus inside the FSM, natively isolated from Hardware I/O
+    local true_consensus = 0xFFFFFFFF
+    for p = 0, 7 do
+        if p ~= ctx.net_identity and ctx.peer_active[p] then
+            if ctx.peer_highest_tick[p] < true_consensus then
+                true_consensus = ctx.peer_highest_tick[p]
+            end
+        end
+    end
+    local local_max_valid_tick = math.max(0, ctx.sim_tick_count - 1)
+    if true_consensus > local_max_valid_tick then
+        true_consensus = local_max_valid_tick
+    end
+    if true_consensus ~= 0xFFFFFFFF and true_consensus > ctx.rollback_arena.confirmed_tick then
+        ctx.rollback_arena.confirmed_tick = true_consensus
+    end
+
     local remote_highest = ctx.rollback_arena.confirmed_tick
 
-    -- Fast-forward / Catch-up logic
     if remote_highest > ctx.sim_tick_count + 2 then
         ctx.accumulator = ctx.accumulator + ((remote_highest - ctx.sim_tick_count) * FIXED_DT)
     end
 
-    -- [!] FIX: The Hard Stall limit MUST be smaller than the struct's history_len max (128).
-    -- By capping it at 100, we guarantee we never "forget" the inputs the slow nodes need.
     if ctx.sim_tick_count > remote_highest + 100 then
         ctx.accumulator = 0
     end
-
-    -- [!] REMOVED: The entire "if ctx.sim_tick_count % 120 == ..." bot block.
 
     while ctx.accumulator >= FIXED_DT do
         local c_idx = bit.band(ctx.sim_tick_count, 255)
         local frame = ctx.rollback_arena.frames[c_idx]
 
-        -- Keep this! It initializes future frames during fast-forwards.
         if frame.tick ~= ctx.sim_tick_count then
             for p = 0, 7 do
                 frame.player_input[p] = 0
@@ -33,27 +45,27 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
             end
             frame.state_checksum = 0
             frame.remote_checksum = 0
+            -- [FIX: BUG 3] Zero-initialize remaining struct fields to prevent dirty reads
+            frame.state = 0 
+            frame.remote_peer_id = 0
         end
         frame.tick = ctx.sim_tick_count
 
-        -- [!] REMOVED: The entire "if ctx.pending_click ~= -1" block.
-        -- The frame already contains the correct hardware inputs.
-
         ctx.rollback_arena.head_tick = ctx.sim_tick_count
-
-        -- ... (The rest of your rollback and State.update_simulation logic remains untouched)
-
-        -- [!] REMOVED: Pump.send_dynamic_history(ctx)
-        -- [!] REMOVED: Pump.intercept_network(ctx, ctx.sim_tick_count)
-        -- The FSM now assumes the hardware loop has already populated the arena.
 
         if ctx.rollback_arena.is_rollback_active == 1 then
             local t_tgt = ctx.rollback_arena.rollback_target
+            
+            -- [FIX: BUG 6] Fatal trap if rollback horizon exceeds structural capacity
+            if (ctx.sim_tick_count - t_tgt) > 127 then
+                print(string.format("[FATAL] Rollback horizon exceeded 128-tick memory limit! Target: %d | Head: %d", t_tgt, ctx.sim_tick_count))
+                os.exit(1)
+            end
+
             local r_idx = bit.band(t_tgt - 1, 255)
 
             ffi.copy(ctx.rts_grid.terrain, ctx.snapshot_ring.terrain[r_idx], bytes_terrain)
             ffi.copy(ctx.rts_grid.elevation, ctx.snapshot_ring.elevation[r_idx], bytes_elevation)
-            -- [!] ADDED: Restore the RNG state from the snapshot history
             ffi.copy(ctx.rts_grid.rng_state, ctx.snapshot_ring.rng_state[r_idx], 4)
 
             for t = t_tgt, ctx.sim_tick_count - 1 do
@@ -66,7 +78,6 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
 
                 ffi.copy(ctx.snapshot_ring.terrain[f_idx], ctx.rts_grid.terrain, bytes_terrain)
                 ffi.copy(ctx.snapshot_ring.elevation[f_idx], ctx.rts_grid.elevation, bytes_elevation)
-                -- [!] ADDED: Save the RNG state during catch-up execution
                 ffi.copy(ctx.snapshot_ring.rng_state[f_idx], ctx.rts_grid.rng_state, 4)
             end
             ctx.rollback_arena.is_rollback_active = 0
@@ -80,10 +91,10 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
 
             ffi.copy(ctx.snapshot_ring.terrain[c_idx], ctx.rts_grid.terrain, bytes_terrain)
             ffi.copy(ctx.snapshot_ring.elevation[c_idx], ctx.rts_grid.elevation, bytes_elevation)
-            -- [!] ADDED: Save the RNG state during live execution
             ffi.copy(ctx.snapshot_ring.rng_state[c_idx], ctx.rts_grid.rng_state, 4)
 
             ctx.sim_tick_count = ctx.sim_tick_count + 1
+
             local conf_tick = ctx.rollback_arena.confirmed_tick
             local sweep_start = math.max(0, conf_tick - 60)
 
