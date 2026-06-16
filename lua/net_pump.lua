@@ -6,8 +6,6 @@ local net = require("network")
 local CHAOS_PACKET_LOSS = 0.0
 local Pump = {}
 
-local peer_ack_of_me = ffi.new("uint32_t[8]")
-
 function Pump.send_dynamic_history(ctx)
     local current_tick = ctx.rollback_arena.head_tick
     local conf_tick = ctx.rollback_arena.confirmed_tick
@@ -28,7 +26,7 @@ function Pump.send_dynamic_history(ctx)
                 pkt.checksum_tick = conf_tick
             end
 
-            local needed_base = peer_ack_of_me[p] + 1
+            local needed_base = ctx.peer_ack_of_me[p] + 1
             if needed_base == 1 then
                 needed_base = math.max(1, current_tick - 127)
             end
@@ -73,8 +71,8 @@ function Pump.intercept_network(ctx, current_tick)
         end
 
         if pid < 8 and pkt.frame_tick >= 0 and ctx.peer_active[pid] then
-            if pkt.ack_tick > peer_ack_of_me[pid] then
-                peer_ack_of_me[pid] = pkt.ack_tick
+            if pkt.ack_tick > ctx.peer_ack_of_me[pid] then
+                ctx.peer_ack_of_me[pid] = pkt.ack_tick
             end
 
             -- [FIX: BUG 5] Window boundary locked to 127 to perfectly match C-struct history capacity

@@ -334,6 +334,7 @@ local ctx = {
     last_bot_tick = 0,
     peer_active = ffi.new("bool[8]"),
     peer_highest_tick = ffi.new("uint32_t[8]"),
+    peer_ack_of_me = ffi.new("uint32_t[8]"), -- [!] ADD THIS
     rts_grid = State.init_grid(total_tiles),
     rollback_arena = ffi.new("RollbackBuffer"),
     snapshot_ring = {

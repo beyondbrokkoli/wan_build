@@ -7,15 +7,21 @@ local RNG = require("sim_rng")
 local FSM = {}
 
 function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
-    -- [FIX: BUG 2] Calculate consensus inside the FSM, natively isolated from Hardware I/O
     local true_consensus = 0xFFFFFFFF
+    local min_ack_of_me = 0xFFFFFFFF -- [!] ADD THIS
+
     for p = 0, 7 do
         if p ~= ctx.net_identity and ctx.peer_active[p] then
             if ctx.peer_highest_tick[p] < true_consensus then
                 true_consensus = ctx.peer_highest_tick[p]
             end
+            -- [!] ADD THIS: Find the slowest peer's ack of our data
+            if ctx.peer_ack_of_me[p] < min_ack_of_me then
+                min_ack_of_me = ctx.peer_ack_of_me[p]
+            end
         end
     end
+
     local local_max_valid_tick = math.max(0, ctx.sim_tick_count - 1)
     if true_consensus > local_max_valid_tick then
         true_consensus = local_max_valid_tick
@@ -24,13 +30,24 @@ function FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
         ctx.rollback_arena.confirmed_tick = true_consensus
     end
 
+    -- [!] ADD THIS: Fallback if alone
+    if min_ack_of_me == 0xFFFFFFFF then
+        min_ack_of_me = ctx.rollback_arena.confirmed_tick
+    end
+
     local remote_highest = ctx.rollback_arena.confirmed_tick
+
+    -- [!] ADD THIS: The absolute lowest tick across both Recv and Send
+    local safe_horizon = math.min(remote_highest, min_ack_of_me)
 
     if remote_highest > ctx.sim_tick_count + 2 then
         ctx.accumulator = ctx.accumulator + ((remote_highest - ctx.sim_tick_count) * FIXED_DT)
     end
 
-    if ctx.sim_tick_count > remote_highest + 100 then
+    -- [!] FIX: Stall against the safe_horizon, not just remote_highest.
+    -- This guarantees the fast node stops at Tick 101 if the slow node hasn't acked Tick 1.
+    -- The 128-packet buffer will now safely hold Ticks 1-101.
+    if ctx.sim_tick_count > safe_horizon + 100 then
         ctx.accumulator = 0
     end
 
