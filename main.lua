@@ -102,6 +102,21 @@ local function get_local_ip()
     return res
 end
 
+local function extract_true_64bit_token(json_string)
+    local token_digits = json_string:match('"session_token"%s*:%s*(%d+)')
+    assert(token_digits, "FATAL: Could not locate session_token digits in JSON payload")
+    local val = ffi.cast("uint64_t", 0)
+    for i = 1, #token_digits do
+        local byte = string.byte(token_digits, i)
+        if byte >= 48 and byte <= 57 then
+            val = (val * 10) + (byte - 48)
+        else
+            break
+        end
+    end
+    return val
+end
+
 local json = require("json_util")
 
 print("Enter Node ID (0-7) OR Preferred Local Port (e.g., 50000): ")
