@@ -6,10 +6,27 @@ local bit = require("bit")
 local structs = require("structs")
 local net = require("network")
 local cfg = require("config_engine")
+local cfg_net = require("config_net") -- [!] ADDED: SSoT Registry
 local FSM = require("fsm_core")
-local Pump = require("net_pump") -- [!] ADDED: Engine needs the pump here now
-local RNG = require("sim_rng")
-local State = require("sim_world")
+local Pump = require("net_pump")
+local Game = require("game_state")
+
+local Engine = {}
+function Engine.SubmitCommand(ctx, opcode, flags, target_id, target_pos)
+    local c_idx = bit.band(ctx.sim_tick_count, cfg_net.RING_MASK)
+    local pending_frame = ctx.rollback_arena.frames[c_idx]
+    local cmds = pending_frame.commands[ctx.net_identity]
+
+    if cmds[0].opcode == 0 then
+        cmds[0].opcode = opcode; cmds[0].flags = flags
+        cmds[0].target_id = target_id; cmds[0].target_pos = target_pos
+    elseif cmds[1].opcode == 0 then
+        cmds[1].opcode = opcode; cmds[1].flags = flags
+        cmds[1].target_id = target_id; cmds[1].target_pos = target_pos
+    else
+        print("[WARNING] Engine Command Buffer saturated for tick " .. ctx.sim_tick_count)
+    end
+end
 
 ffi.cdef[[
     void Sleep(uint32_t dwMilliseconds);
@@ -85,11 +102,7 @@ local function get_local_ip()
     return res
 end
 
-local json = require("json_util") -- [JSON UTILS INJECTED]
-
-local MATCHMAKER_URL = "http://138.199.152.240:80"
-local STUN_SERVER = "138.199.152.240"
-local STUN_PORT = 3478
+local json = require("json_util")
 
 print("Enter Node ID (0-7) OR Preferred Local Port (e.g., 50000): ")
 io.write("> ")
@@ -103,8 +116,9 @@ end
 assert(net.Host(local_port), "FATAL: Failed to bind local socket port " .. local_port)
 local my_local_ip = get_local_ip()
 
-print(string.format("[STUN] Querying external NAT edges at %s:%d...", STUN_SERVER, STUN_PORT))
-local stun_ok, my_pub_ip, my_pub_port = net.StunPunch(STUN_SERVER, STUN_PORT)
+-- [!] SSoT: STUN Logic
+print(string.format("[STUN] Querying external NAT edges at %s:%d...", cfg_net.STUN_SERVER, cfg_net.STUN_PORT))
+local stun_ok, my_pub_ip, my_pub_port = net.StunPunch(cfg_net.STUN_SERVER, cfg_net.STUN_PORT)
 
 if not stun_ok then
     print("[WARNING] STUN negotiation failed. Operating via local loopbacks.")
@@ -114,36 +128,27 @@ else
     print(string.format("[STUN] Discovery successful. External mapped endpoint: %s:%d", my_pub_ip, my_pub_port))
 end
 
--- BULLETPROOF 64-BIT SESSION TOKEN EXTRACTION (ZERO C-RUNTIME DEPENDENCY)
 local function extract_true_64bit_token(json_string)
     local token_digits = json_string:match('"session_token"%s*:%s*(%d+)')
     assert(token_digits, "FATAL: Could not locate session_token digits in JSON payload")
-
-    -- Initialize a pure 64-bit unsigned integer at 0
     local val = ffi.cast("uint64_t", 0)
-
-    -- Iterate through the ascii bytes of the string manually
     for i = 1, #token_digits do
         local byte = string.byte(token_digits, i)
-
-        if byte >= 48 and byte <= 57 then -- If char is '0' to '9'
-            -- Shift current value by a base of 10, then add the new digit
+        if byte >= 48 and byte <= 57 then
             val = (val * 10) + (byte - 48)
         else
             break
         end
     end
-
     return val
 end
 
--- LOBBY & NETWORK EDGE DISCOVERY INITIALIZATION
 print("\n[MATCHMAKING] Select Mode: (H)ost New Game or (J)oin Existing Lobby")
 io.write("> ")
 local mode_input = io.read("*l"):upper()
 
 local lobby_id = ""
-local session_token = nil -- Will be a pure cdata<uint64_t>
+local session_token = nil
 
 local payload_tbl = {
     public_ip = my_pub_ip,
@@ -155,15 +160,11 @@ local initial_payload = json.encode(payload_tbl)
 
 if mode_input == "H" then
     print("[MATCHMAKER] Requesting new lobby...")
-    local response = http_post(MATCHMAKER_URL .. "/host", initial_payload)
-
-    -- Extract 64-bit token natively via C
+    -- [!] SSoT: HTTP Matchmaker
+    local response = http_post(cfg_net.MATCHMAKER_URL .. "/host", initial_payload)
     session_token = extract_true_64bit_token(response)
-
-    -- Decode the rest for the lobby ID
     local res_data = json.decode(response)
     lobby_id = res_data.lobby_id
-
     print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
 else
     if mode_input == "J" then
@@ -173,39 +174,31 @@ else
     else
         lobby_id = mode_input:upper()
     end
-
     print("[MATCHMAKER] Joining Lobby: " .. lobby_id)
-    local response = http_post(MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
-
-    -- Extract 64-bit token natively via C
+    -- [!] SSoT: HTTP Matchmaker
+    local response = http_post(cfg_net.MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
     session_token = extract_true_64bit_token(response)
 end
 
--- Protect the C-routing table from the relay
-net.SetRelayIP("138.199.152.240")
+-- [!] SSoT: Relay Logic
+net.SetRelayIP(cfg_net.RELAY_IP)
 
--- [THE SOCKET DRAIN TRAP]
--- Allocate enough contiguous memory to drain a massive WAN spike in a single frame
-local MAX_BURST_PACKETS = 256
-local incoming_packets = ffi.new("LockstepPacket[?]", MAX_BURST_PACKETS)
-
--- POLLED SYNCHRONIZATION HOLD
 print("[MATCHMAKER] Polling quorum status. Waiting for 'locked'...")
 local status_data = nil
 
 while true do
-    local raw_res = http_get(MATCHMAKER_URL .. "/status/" .. lobby_id)
+    -- [!] SSoT: HTTP Matchmaker
+    local raw_res = http_get(cfg_net.MATCHMAKER_URL .. "/status/" .. lobby_id)
     if raw_res and raw_res ~= "" then
         status_data = json.decode(raw_res)
         if status_data.status == "locked" then
-            print(string.format("[MATCHMAKER] Quorum reached (%d/8). Lobby is LOCKED.", status_data.player_count))
+            print(string.format("[MATCHMAKER] Quorum reached (%d/%d). Lobby is LOCKED.", status_data.player_count, cfg_net.MAX_PLAYERS))
             break
         end
     end
     sys_sleep(500)
 end
 
--- Derive local ID
 local net_id_derived = 0
 for i, p in ipairs(status_data.players) do
     if p.ip == my_pub_ip and tonumber(p.port) == my_pub_port and p.local_ip == my_local_ip and p.local_port == local_port then
@@ -220,76 +213,81 @@ net.SetSession(session_token)
 
 print(string.format("[SYSTEM] Assigning Identity: Node %d. Meshing topology...", local_id))
 
--- =============================================================================
--- [GLEIS 9 3/4] SYNCHRONIZED NAT TRAVERSAL & GLOBAL HOLD
--- =============================================================================
-
 local p2p_established = {}
 local active_peers = {}
 
--- 1. Prime the C-routing table with status_data.players endpoints
 for i, p in ipairs(status_data.players) do
     local peer_id = i - 1
     if peer_id ~= local_id then
         active_peers[peer_id] = true
 
-        if p.ip == my_pub_ip and p.local_ip == my_local_ip then
-            net.Connect(peer_id, "127.0.0.1", tonumber(p.local_port))
+        -- [!] THE ANTI-HAIRPIN LAN CLAMP
+        -- If we share a public IP or matchmaker says 127.0.0.1, we are behind the same NAT.
+        if p.ip == my_pub_ip or p.ip == "127.0.0.1" or my_pub_ip == "127.0.0.1" then
+
+            -- Resolve VirtualBox Bridged (diff local IPs) vs strict localhost (same local IP)
+            local target_ip = (p.local_ip == my_local_ip) and "127.0.0.1" or p.local_ip
+
+            net.Connect(peer_id, target_ip, tonumber(p.local_port))
+
+            -- Instantly trust the local subnet. This bypasses the Mutual Handshake loop below.
             p2p_established[peer_id] = true
-            print(string.format("[ICE] Node %d is local loopback. P2P bypassed.", peer_id))
-        elseif p.ip == my_pub_ip then
-            net.Connect(peer_id, p.local_ip, tonumber(p.local_port))
-            p2p_established[peer_id] = true
-            print(string.format("[ICE] Node %d is on LAN. Hairpin bypassed.", peer_id))
+            print(string.format("[ROUTING] Node %d clamped to LAN (%s:%d). Hairpin bypassed.", peer_id, target_ip, p.local_port))
+
         else
-            -- Genuine WAN target: point C-socket to their public STUN IP
+            -- Different Public IP = True WAN. Stage it for ICE punching and Omnibus fallback.
             net.Connect(peer_id, p.ip, tonumber(p.port))
+            print(string.format("[ROUTING] Node %d is WAN. Staging for ICE...", peer_id))
         end
     end
 end
 
--- 2. Hole Punch DURING the Server-Mandated Global Sync Hold
 local real_time_remaining = status_data.start_time - status_data.server_time
 local sync_start_time = get_time_hires()
 
 if real_time_remaining > 0 then
-    print(string.format("[ICE] Quorum locked. Blasting P2P tokens for %.2f seconds...", real_time_remaining))
+    print(string.format("[ICE] Quorum locked. Initiating Mutual Handshake for %.2f seconds...", real_time_remaining))
     local handshake_buffer = ffi.new("LockstepPacket[32]")
 
-    -- Replaced os.clock() with get_time_hires() for accurate wall-clock traversal
-    while (get_time_hires() - sync_start_time) < real_time_remaining do
+    -- [!] NEW: Track asymmetric reception state separately from mutual establishment
+    local p2p_heard = {}
 
-        -- Send a handshake ping directly to all unverified WAN peers
+    while (get_time_hires() - sync_start_time) < real_time_remaining do
         for peer_id, active in pairs(active_peers) do
             if active and not p2p_established[peer_id] then
                 local ping_pkt = ffi.new("LockstepPacket")
                 ping_pkt.session_token = session_token
                 ping_pkt.player_id = local_id
-                ping_pkt.frame_tick = 0
 
+                -- STATE MACHINE: Send 1 (PONG) if we heard them, else send 0 (PING)
+                ping_pkt.frame_tick = p2p_heard[peer_id] and 1 or 0
                 net.SendTo(ping_pkt, peer_id)
             end
         end
 
-        -- Flush ingress to see if anyone punched through to us
         local count = net.RecvAll(handshake_buffer, 32)
         for i = 0, count - 1 do
             local pkt = handshake_buffer[i]
-            if pkt.session_token == session_token and pkt.frame_tick == 0 then
-                if not p2p_established[pkt.player_id] then
-                    p2p_established[pkt.player_id] = true
-                    print(string.format("[ICE] P2P Direct Punch-Through SUCCESS for Node %d!", pkt.player_id))
+            if pkt.session_token == session_token then
+                local sender = pkt.player_id
+
+                -- They sent a packet (Ping or Pong). Asymmetric reception achieved.
+                p2p_heard[sender] = true
+
+                -- If they sent a PONG (1+), they heard our PING. Mutual trust confirmed!
+                if pkt.frame_tick >= 1 and not p2p_established[sender] then
+                    p2p_established[sender] = true
+                    print(string.format("[ICE] Mutual P2P Punch-Through SUCCESS for Node %d!", sender))
                 end
             end
         end
-
-        sys_sleep(50) -- Sleep safely without pausing the hires clock
+        sys_sleep(50)
     end
 end
 
--- 3. Fallback Evaluation
 print("[ICE] Sync window closed. Evaluating routing topologies...")
-net.SetRelayIP("138.199.152.240") -- Protect the learned P2P routes from the relay
+-- [!] SSoT: Relay Logic
+net.SetRelayIP(cfg_net.RELAY_IP)
 
 for peer_id, active in pairs(active_peers) do
     if active then
@@ -297,21 +295,17 @@ for peer_id, active in pairs(active_peers) do
             print(string.format("[ROUTING] Node %d -> P2P [DIRECT RESIDENTIAL]", peer_id))
         else
             print(string.format("[ROUTING] Node %d -> P2P [FAILED]. Falling back to Hetzner Relay.", peer_id))
-            net.Connect(peer_id, "138.199.152.240", 49152)
+            net.Connect(peer_id, cfg_net.RELAY_IP, cfg_net.RELAY_PORT) -- [!] SSoT
         end
     end
 end
 
+-- [!] NEW: Dedicated Omnibus Relay Socket (Index 8)
+-- Bypasses dirty NAT states from the ICE phase
+net.Connect(cfg_net.MAX_PLAYERS, cfg_net.RELAY_IP, cfg_net.RELAY_PORT)
+
 print("[SYSTEM] All routes bound. Drop-in complete.")
 
--- Engine Data Setup
--- local total_tiles = cfg.world.map_width * cfg.world.map_height ...
-
--- =============================================================================
--- (This connects seamlessly to your existing real_time_remaining logic below)
--- local real_time_remaining = status_data.start_time - status_data.server_time
-
--- Perfect sync: server_time and start_time arrive in the exact same HTTP response
 local real_time_remaining = status_data.start_time - status_data.server_time
 
 if real_time_remaining > 0 then
@@ -319,65 +313,46 @@ if real_time_remaining > 0 then
     sys_sleep(real_time_remaining * 1000)
 end
 
--- Engine Data Setup
-local total_tiles = cfg.world.map_width * cfg.world.map_height
-local bytes_terrain = 8 * total_tiles * ffi.sizeof("uint16_t")
-local bytes_elevation = 8 * total_tiles * ffi.sizeof("float")
-
 local ctx = {
-    session_token = session_token,
-    net_identity = local_id,
-    sim_tick_count = 1,
-    accumulator = 0.0,
-    pending_click = -1,
-    total_tiles = total_tiles,
-    last_bot_tick = 0,
-    peer_active = ffi.new("bool[8]"),
-    peer_highest_tick = ffi.new("uint32_t[8]"),
-    peer_ack_of_me = ffi.new("uint32_t[8]"), -- [!] ADD THIS
-    rts_grid = State.init_grid(total_tiles),
-    rollback_arena = ffi.new("RollbackBuffer"),
-    snapshot_ring = {
-        terrain = ffi.new(string.format("uint16_t[256][8][%d]", total_tiles)),
-        elevation = ffi.new(string.format("float[256][8][%d]", total_tiles)),
-        -- [!] ADDED: 256 slots to perfectly track the RNG history
-        rng_state = ffi.new("uint32_t[256][1]")
+        session_token = session_token,
+        net_identity = local_id,
+        sim_tick_count = 1,
+        accumulator = 0.0,
+        total_tiles = cfg.world.map_width * cfg.world.map_height,
+        last_bot_tick = 0,
+        p2p_established = p2p_established,
+        peer_active = ffi.new(string.format("bool[%d]", cfg_net.MAX_PLAYERS)),
+        peer_highest_tick = ffi.new(string.format("uint32_t[%d]", cfg_net.MAX_PLAYERS)),
+        peer_ack_of_me = ffi.new(string.format("uint32_t[%d]", cfg_net.MAX_PLAYERS)),
+
+        -- Black Box allocations
+        rts_grid = Game.InitState(session_token),
+        rollback_arena = ffi.new("RollbackBuffer"),
+        snapshot_ring = ffi.new(string.format("%s[%d]", Game.GetStateName(), cfg_net.RING_SIZE))
     }
-}
 
 local f0 = ctx.rollback_arena.frames[0]
 f0.tick = 0
-for p = 0, 7 do
-    f0.click_grid_idx[p] = 65535
-    f0.player_input[p] = 0
+for p = 0, cfg_net.MAX_PLAYERS - 1 do
+    f0.commands[p][0].opcode = 0
+    f0.commands[p][1].opcode = 0
 end
 
 ctx.rollback_arena.head_tick = 0
 ctx.rollback_arena.confirmed_tick = 0
 
-for p = 0, 7 do
+for p = 0, cfg_net.MAX_PLAYERS - 1 do
     if p ~= local_id then
         ctx.peer_active[p] = true
     end
 end
 
--- [!] CHANGED: Seed the RNG into the RTS grid state
-RNG.seed(ctx.rts_grid.rng_state, session_token)
+ffi.copy(ctx.snapshot_ring[0], ctx.rts_grid, Game.GetStateSize())
+f0.state_checksum = Game.HashState(ctx.rts_grid)
 
-ffi.copy(ctx.snapshot_ring.terrain[0], ctx.rts_grid.terrain, bytes_terrain)
-ffi.copy(ctx.snapshot_ring.elevation[0], ctx.rts_grid.elevation, bytes_elevation)
--- [!] ADDED: Snapshot the initial RNG state for Tick 0
-ffi.copy(ctx.snapshot_ring.rng_state[0], ctx.rts_grid.rng_state, 4)
-
-local h0_terrain = net.HashState(ctx.rts_grid.terrain, bytes_terrain, 0)
-f0.state_checksum = net.HashState(ctx.rts_grid.elevation, bytes_elevation, h0_terrain)
-
-local TICK_RATE = 60
-local FIXED_DT = 1.0 / TICK_RATE
+local FIXED_DT = 1.0 / cfg_net.TICK_RATE
 local last_time = get_time_hires()
 local next_debug_print = last_time + 1.0
-
--- ... (Everything prior to the pristine FSM loop remains untouched)
 
 print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
 
@@ -388,47 +363,45 @@ while true do
 
     Pump.intercept_network(ctx, ctx.sim_tick_count)
 
-    local c_idx = bit.band(ctx.sim_tick_count, 255)
+    local c_idx = bit.band(ctx.sim_tick_count, cfg_net.RING_MASK)
     local pending_frame = ctx.rollback_arena.frames[c_idx]
 
     if pending_frame.tick ~= ctx.sim_tick_count then
         pending_frame.tick = ctx.sim_tick_count
-        for p = 0, 7 do
-            pending_frame.player_input[p] = 0
-            pending_frame.click_grid_idx[p] = 65535
+        for p = 0, cfg_net.MAX_PLAYERS - 1 do
+            pending_frame.commands[p][0].opcode = 0
+            pending_frame.commands[p][1].opcode = 0
         end
         pending_frame.state_checksum = 0
         pending_frame.remote_checksum = 0
-        -- [FIX: BUG 4] Complete initialization of the frame for hardware polling
         pending_frame.state = 0
         pending_frame.remote_peer_id = 0
     end
 
     if ctx.sim_tick_count % 120 == (ctx.net_identity * 10) then
         if ctx.last_bot_tick ~= ctx.sim_tick_count then
-            -- [FALSE POSITIVE: BUG 7] math.random is completely fine here. It acts as the "human hardware click", not internal FSM logic.
-            pending_frame.click_grid_idx[ctx.net_identity] = math.random(0, ctx.total_tiles - 1)
+            Engine.SubmitCommand(ctx, 1, 0, 0, math.random(0, ctx.total_tiles - 1))
             ctx.last_bot_tick = ctx.sim_tick_count
         end
     end
 
     ctx.accumulator = ctx.accumulator + frame_time
-    FSM.tick_playing_state(ctx, FIXED_DT, bytes_terrain, bytes_elevation)
+    FSM.tick_playing_state(ctx, FIXED_DT)
 
     Pump.send_dynamic_history(ctx)
 
     if current_time >= next_debug_print then
-        local display_idx = bit.band(ctx.sim_tick_count - 1, 255)
+        local display_idx = bit.band(ctx.sim_tick_count - 1, cfg_net.RING_MASK)
         local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
         local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
-        
+
         local tracker_str = ""
-        for p = 0, 7 do
+        for p = 0, cfg_net.MAX_PLAYERS - 1 do
             if p ~= ctx.net_identity then
                 tracker_str = tracker_str .. string.format("P%d:%d ", p, ctx.peer_highest_tick[p])
             end
         end
-        
+
         print("[DIAGNOSTIC] Peer Ticks: " .. tracker_str)
         print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X",
             ctx.sim_tick_count,
@@ -437,7 +410,7 @@ while true do
             missing_frames,
             display_checksum
         ))
-        
+
         next_debug_print = current_time + 1.0
     end
     sys_sleep(1)

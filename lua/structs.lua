@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local cfg_net = require("config_net")
 local M = {}
 
 local struct_sizes = {
@@ -20,19 +21,27 @@ end
 
 M.specs = {
     {
+       name = "PlayerCommand", align = 1, force_align = true, wire_format = true,
+       members = {
+            { type = "uint8_t", name = "opcode" },
+            { type = "uint8_t", name = "flags" },
+            { type = "uint16_t", name = "target_id" },
+            { type = "uint32_t", name = "target_pos" }
+        }
+    },
+    {
         name = "LockstepPacket", align = 1, wire_format = true, force_align = true,
         members = {
             { type = "uint64_t", name = "session_token" },
             { type = "uint32_t", name = "frame_tick" },
             { type = "uint32_t", name = "checksum_tick" },
             { type = "uint32_t", name = "state_checksum" },
-            { type = "uint32_t", name = "ack_tick" },
             { type = "uint32_t", name = "base_tick" },
             { type = "uint8_t", name = "player_id" },
             { type = "uint8_t", name = "history_count" },
-            { type = "uint16_t", name = "_align_pad" },
-            { type = "uint32_t", name = "clicks", count = 128 }, -- [SCALE UP]
-            { type = "uint8_t", name = "inputs", count = 128 }   -- [SCALE UP]
+            { type = "uint16_t", name = "_align_pad" }, -- [!] RESTORED: Forces 4-byte alignment
+            { type = "uint32_t", name = "peer_acks", count = cfg_net.MAX_PLAYERS },
+            { type = "PlayerCommand", name = "commands", count = { cfg_net.HISTORY_LEN, 2 } }
         }
     },
     {
@@ -43,8 +52,7 @@ M.specs = {
             { type = "uint32_t", name = "state_checksum" },
             { type = "uint32_t", name = "remote_checksum" },
             { type = "uint8_t", name = "remote_peer_id" },
-            { type = "uint8_t", name = "player_input", count = 8 },
-            { type = "uint32_t", name = "click_grid_idx", count = 8 }
+            { type = "PlayerCommand", name = "commands", count = { cfg_net.MAX_PLAYERS, 2 } }
         }
     },
     {
@@ -54,7 +62,7 @@ M.specs = {
             { type = "uint32_t", name = "confirmed_tick" },
             { type = "uint8_t", name = "is_rollback_active" },
             { type = "uint32_t", name = "rollback_target" },
-            { type = "NetworkFrame", name = "frames", count = 256 } -- [SCALE UP]
+            { type = "NetworkFrame", name = "frames", count = cfg_net.RING_SIZE }
         }
     }
 }
