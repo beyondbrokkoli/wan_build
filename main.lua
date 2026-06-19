@@ -161,7 +161,13 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
         lobby_id = json.decode(response).lobby_id
         print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
     else
-        lobby_id = (mode_input == "J") and (io.write("> ") or io.read("*l"):upper()) or mode_input
+        if mode_input == "J" then
+            print("Enter Target 4-Character Lobby ID:")
+            io.write("> ")
+            lobby_id = io.read("*l"):upper()
+        else
+            lobby_id = mode_input:upper()
+        end
         print("[MATCHMAKER] Joining Lobby: " .. lobby_id)
         local response = http_post(cfg_net.MATCHMAKER_URL .. "/join/" .. lobby_id, initial_payload)
         session_token = extract_true_64bit_token(response)
