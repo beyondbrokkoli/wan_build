@@ -61,7 +61,8 @@ typedef struct {
     alignas(64) _Atomic int ready_index;
     _Atomic int is_running;
     _Atomic int lua_finished;
-    _Atomic(void*) vk_instance;
+
+    _Atomic(void*) vk_instance[MAX_WINDOWS];
 
     // --- MULTI-TENANCY WINDOW ARRAYS ---
     _Atomic int glfw_cmd[MAX_WINDOWS];
@@ -101,7 +102,11 @@ EXPORT int vx_core_is_running() { return atomic_load_explicit(&g_engine.mailbox.
 EXPORT void vx_core_shutdown() { atomic_store_explicit(&g_engine.mailbox.is_running, 0, memory_order_release); }
 EXPORT void vx_core_mark_finished() { atomic_store_explicit(&g_engine.mailbox.lua_finished, 1, memory_order_release); }
 EXPORT const char** vx_sys_glfw_extensions(uint32_t* count) { return glfwGetRequiredInstanceExtensions(count); }
-EXPORT void vx_sys_publish_instance(void* instance) { atomic_store_explicit(&g_engine.mailbox.vk_instance, instance, memory_order_release); }
+
+EXPORT void vx_sys_publish_instance(int window_id, void* instance) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return;
+    atomic_store_explicit(&g_engine.mailbox.vk_instance[window_id], instance, memory_order_release);
+}
 
 EXPORT void* vx_sys_get_surface(int window_id) {
     if (window_id < 0 || window_id >= MAX_WINDOWS) return NULL;
@@ -906,15 +911,11 @@ int main(int argc, char** argv) {
 
                 glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
                 glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-
-                // Allow dynamic title or stick to the universal
                 windows[i] = glfwCreateWindow(w, h, "Weaver Engine", NULL, NULL);
                 glfwSetWindowSizeLimits(windows[i], 640, 360, GLFW_DONT_CARE, GLFW_DONT_CARE);
 
-                // Bind ID for callbacks
                 glfwSetWindowUserPointer(windows[i], (void*)(intptr_t)i);
 
-                // --- THE WINDOWS FOCUS OVERRIDE HACK ---
                 glfwShowWindow(windows[i]);
                 glfwSetWindowAttrib(windows[i], GLFW_FLOATING, GLFW_TRUE);
                 glfwFocusWindow(windows[i]);
@@ -930,13 +931,18 @@ int main(int argc, char** argv) {
                 glfwGetFramebufferSize(windows[i], &fb_w, &fb_h);
                 atomic_store_explicit(&g_engine.mailbox.win_w[i], fb_w, memory_order_release);
                 atomic_store_explicit(&g_engine.mailbox.win_h[i], fb_h, memory_order_release);
+            }
 
-                void* instance = atomic_load_explicit(&g_engine.mailbox.vk_instance, memory_order_acquire);
+            // --- DECOUPLED SURFACE CREATION (THE DEADLOCK FIX) ---
+            // Continuously checks if a window exists but lacks a surface.
+            // This guarantees surface creation no matter what order Lua threads execute in.
+            if (windows[i] != NULL && atomic_load_explicit(&g_engine.mailbox.vk_surface[i], memory_order_acquire) == NULL) {
+                void* instance = atomic_load_explicit(&g_engine.mailbox.vk_instance[i], memory_order_acquire);
                 if (instance != NULL) {
                     VkSurfaceKHR surface;
                     if (glfwCreateWindowSurface((VkInstance)instance, windows[i], NULL, &surface) == VK_SUCCESS) {
                         atomic_store_explicit(&g_engine.mailbox.vk_surface[i], (void*)surface, memory_order_release);
-                        printf("[C-CORE] Window %d & Surface Created on Lua's Demand!\n", i);
+                        printf("[C-CORE] Window %d & Surface Bound Successfully!\n", i);
                     }
                 }
             }
