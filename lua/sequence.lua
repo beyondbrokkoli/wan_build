@@ -57,20 +57,22 @@ function SequenceModule.init(app_ctx)
                 memory.InitTransferSubsystem(ctx.vk_runtime)
 
                 -- 1. Master GPU Block (Dynamic Grid)
+                -- Bits: Storage(32) | Vertex(128) | Indirect(256) | Transfer Src(1) | Transfer Dst(2) = 419
                 local grid_bytes = map_grid_cells * 16
-                local gpu_bytes = math.floor(grid_bytes * 8 * 1.1) -- 8 Dimensions + Margin
-                -- Usage: 32 (Transfer Src) | 128 (Storage) | 256 (Transfer Dst)
-                memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", gpu_bytes, 416, ctx.vk_runtime)
+                local gpu_bytes = math.floor(grid_bytes * 8 * 1.1) 
+                memory.CreateHostVisibleBuffer("MASTER_GPU_BLOCK", "uint8_t", gpu_bytes, 419, ctx.vk_runtime)
 
                 -- 2. Master Index Block (6 indices per quad)
-                -- Usage: 64 (Index Buffer) | 256 (Transfer Dst)
-                memory.CreateHostVisibleBuffer("MASTER_INDEX_BLOCK", "uint32_t", map_grid_cells * 6, 320, ctx.vk_runtime)
+                -- Bits: Index(64) | Indirect(256) | Transfer Dst(2) = 322
+                memory.CreateHostVisibleBuffer("MASTER_INDEX_BLOCK", "uint32_t", map_grid_cells * 6, 322, ctx.vk_runtime)
 
                 -- 3. Palette Color Pipeline
-                -- Usage: 1 (Transfer Src)
+                -- Bits: Transfer Src(1) = 1
                 memory.CreateHostVisibleBuffer("PALETTE_STAGING", "float", 4096, 1, ctx.vk_runtime)
-                -- Usage: 128 (Storage) | 256 (Transfer Dst)
-                memory.CreateBufferHaven("PALETTE_HAVEN", 16384, 384, ctx.vk_runtime)
+
+                -- 4. Palette Haven
+                -- Bits: Storage(32) | Vertex(128) | Indirect(256) | Transfer Dst(2) = 418
+                memory.CreateBufferHaven("PALETTE_HAVEN", 16384, 418, ctx.vk_runtime)
 
                 print("[WEAVER] Strict VRAM Mapping Complete.")
             end
