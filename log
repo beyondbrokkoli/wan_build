@@ -1,5 +1,0 @@
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkCmdCopyBuffer(): dstBuffer (VkBuffer 0xa000000000a) was created with VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT but requires VK_BUFFER_USAGE_2_TRANSFER_DST_BIT.
-The Vulkan spec states: dstBuffer must have been created with the VK_BUFFER_USAGE_TRANSFER_DST_BIT usage flag set (https://docs.vulkan.org/spec/latest/chapters/copies.html#VUID-vkCmdCopyBuffer-dstBuffer-00120)
-
