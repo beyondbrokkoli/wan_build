@@ -46,37 +46,45 @@ static void vmath_thread_join(vmath_thread_t thread) {
     pthread_join(thread, NULL);
 }
 
+#define MAX_WINDOWS 4
+
 #define CMD_IDLE 0
 #define CMD_BOOT_WINDOW 1
 #define CMD_KILL_WINDOW 2
 
-static bool s_is_fullscreen = false;
-static int s_win_x = 0, s_win_y = 0;
-static int s_win_w = 1280, s_win_h = 720;
+// Track fullscreen state per window
+static bool s_is_fullscreen[MAX_WINDOWS] = {false};
+static int s_win_x[MAX_WINDOWS] = {0}, s_win_y[MAX_WINDOWS] = {0};
+static int s_win_w[MAX_WINDOWS] = {1280}, s_win_h[MAX_WINDOWS] = {720};
 
 typedef struct {
     alignas(64) _Atomic int ready_index;
     _Atomic int is_running;
     _Atomic int lua_finished;
     _Atomic(void*) vk_instance;
-    _Atomic(void*) vk_surface;
-    _Atomic int glfw_cmd;
-    _Atomic int glfw_arg_w;
-    _Atomic int glfw_arg_h;
+
+    // --- MULTI-TENANCY WINDOW ARRAYS ---
+    _Atomic int glfw_cmd[MAX_WINDOWS];
+    _Atomic int glfw_arg_w[MAX_WINDOWS];
+    _Atomic int glfw_arg_h[MAX_WINDOWS];
+
+    _Atomic(void*) vk_surface[MAX_WINDOWS];
+
+    _Atomic int window_resized[MAX_WINDOWS];
+    _Atomic int win_w[MAX_WINDOWS];
+    _Atomic int win_h[MAX_WINDOWS];
+    // -----------------------------------
+
+    // Global Input State (Shared across all windows)
     _Atomic int last_key_pressed;
     _Atomic uint32_t wasd_mask;
     _Atomic float mouse_dx;
     _Atomic float mouse_dy;
-
-    _Atomic float mouse_x;  // Add this
-    _Atomic float mouse_y;  // Add this
-    _Atomic float click_x;  // NEW: Hardware-latched X
-    _Atomic float click_y;  // NEW: Hardware-latched Y
-    _Atomic int mouse_captured; // NEW: Track the F10 toggle state
-
-    _Atomic int window_resized;
-    _Atomic int win_w;
-    _Atomic int win_h;
+    _Atomic float mouse_x;
+    _Atomic float mouse_y;
+    _Atomic float click_x;
+    _Atomic float click_y;
+    _Atomic int mouse_captured;
     _Atomic int mouse_left;
     _Atomic int mouse_right;
     _Atomic int key_space;
@@ -95,31 +103,44 @@ EXPORT void vx_core_shutdown() { atomic_store_explicit(&g_engine.mailbox.is_runn
 EXPORT void vx_core_mark_finished() { atomic_store_explicit(&g_engine.mailbox.lua_finished, 1, memory_order_release); }
 EXPORT const char** vx_sys_glfw_extensions(uint32_t* count) { return glfwGetRequiredInstanceExtensions(count); }
 EXPORT void vx_sys_publish_instance(void* instance) { atomic_store_explicit(&g_engine.mailbox.vk_instance, instance, memory_order_release); }
-EXPORT void* vx_sys_get_surface() { return atomic_load_explicit(&g_engine.mailbox.vk_surface, memory_order_acquire); }
 
-EXPORT void vx_sys_set_cmd(int cmd, int w, int h) {
-    atomic_store_explicit(&g_engine.mailbox.glfw_arg_w, w, memory_order_relaxed);
-    atomic_store_explicit(&g_engine.mailbox.glfw_arg_h, h, memory_order_relaxed);
-    atomic_store_explicit(&g_engine.mailbox.glfw_cmd, cmd, memory_order_release);
+EXPORT void* vx_sys_get_surface(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return NULL;
+    return atomic_load_explicit(&g_engine.mailbox.vk_surface[window_id], memory_order_acquire);
+}
+
+EXPORT void vx_sys_set_cmd(int window_id, int cmd, int w, int h) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return;
+    atomic_store_explicit(&g_engine.mailbox.glfw_arg_w[window_id], w, memory_order_relaxed);
+    atomic_store_explicit(&g_engine.mailbox.glfw_arg_h[window_id], h, memory_order_relaxed);
+    atomic_store_explicit(&g_engine.mailbox.glfw_cmd[window_id], cmd, memory_order_release);
 }
 
 EXPORT int vx_input_last_key() {
     return atomic_exchange_explicit(&g_engine.mailbox.last_key_pressed, 0, memory_order_acquire);
 }
 
-double last_mx = 0.0, last_my = 0.0;
-bool first_mouse = true;
-static bool s_mouse_captured = false;
+double last_mx[MAX_WINDOWS] = {0.0};
+double last_my[MAX_WINDOWS] = {0.0};
+bool first_mouse[MAX_WINDOWS] = {true};
 
 void glfw_cursor_callback(GLFWwindow* window, double xpos, double ypos) {
-    // Record absolute coordinates for Lua edge-panning
+    int id = (int)(intptr_t)glfwGetWindowUserPointer(window);
+    if (id < 0 || id >= MAX_WINDOWS) return;
+
+    if (first_mouse[id]) {
+        last_mx[id] = xpos;
+        last_my[id] = ypos;
+        first_mouse[id] = false;
+    }
+
     atomic_store_explicit(&g_engine.mailbox.mouse_x, (float)xpos, memory_order_release);
     atomic_store_explicit(&g_engine.mailbox.mouse_y, (float)ypos, memory_order_release);
 
-    // 3. Normal Delta Calculation
-    float dx = (float)(xpos - last_mx);
-    float dy = (float)(ypos - last_my);
-    last_mx = xpos; last_my = ypos;
+    float dx = (float)(xpos - last_mx[id]);
+    float dy = (float)(ypos - last_my[id]);
+    last_mx[id] = xpos;
+    last_my[id] = ypos;
 
     float current_dx = atomic_load_explicit(&g_engine.mailbox.mouse_dx, memory_order_acquire);
     while (!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.mouse_dx, &current_dx, current_dx + dx, memory_order_release, memory_order_relaxed));
@@ -129,10 +150,13 @@ void glfw_cursor_callback(GLFWwindow* window, double xpos, double ypos) {
 }
 
 void glfw_mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    int id = (int)(intptr_t)glfwGetWindowUserPointer(window);
+    if (id < 0 || id >= MAX_WINDOWS) return;
+
     if (button == GLFW_MOUSE_BUTTON_LEFT) {
         if (action == GLFW_PRESS) {
             double cx, cy;
-            glfwGetCursorPos(window, &cx, &cy); // Get exact coordinate of the event
+            glfwGetCursorPos(window, &cx, &cy);
             atomic_store_explicit(&g_engine.mailbox.click_x, (float)cx, memory_order_release);
             atomic_store_explicit(&g_engine.mailbox.click_y, (float)cy, memory_order_release);
             atomic_store_explicit(&g_engine.mailbox.mouse_left, 1, memory_order_release);
@@ -140,7 +164,6 @@ void glfw_mouse_button_callback(GLFWwindow* window, int button, int action, int 
             atomic_store_explicit(&g_engine.mailbox.mouse_left, 0, memory_order_release);
         }
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        // DO NOT LOSE THIS!
         atomic_store_explicit(&g_engine.mailbox.mouse_right, (action == GLFW_PRESS) ? 1 : 0, memory_order_release);
     }
 }
@@ -166,6 +189,9 @@ EXPORT int vx_input_is_captured() {
 }
 
 void glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    int id = (int)(intptr_t)glfwGetWindowUserPointer(window);
+    if (id < 0 || id >= MAX_WINDOWS) return;
+
     if (action == GLFW_PRESS || action == GLFW_RELEASE) {
         uint32_t bit = 0;
         if (key == GLFW_KEY_W) bit = 1; else if (key == GLFW_KEY_S) bit = 2;
@@ -180,49 +206,45 @@ void glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, in
         }
     }
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        // Instantly trigger shutdown, no mouse-capture gatekeeping needed
         atomic_store_explicit(&g_engine.mailbox.last_key_pressed, GLFW_KEY_ESCAPE, memory_order_release);
     }
     if (key == GLFW_KEY_SPACE) {
-        // 1 means pressed or held, 0 means released
         atomic_store_explicit(&g_engine.mailbox.key_space, (action != GLFW_RELEASE) ? 1 : 0, memory_order_release);
     }
-    // === F11 NATIVE FULLSCREEN TOGGLE ===
-    if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
-        if (!s_is_fullscreen) {
-            // 1. Save the exact window position and size before maximizing
-            glfwGetWindowPos(window, &s_win_x, &s_win_y);
-            glfwGetWindowSize(window, &s_win_w, &s_win_h);
 
-            // 2. Get the primary monitor and its native resolution
+    // === MULTI-TENANT NATIVE FULLSCREEN TOGGLE ===
+    if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
+        if (!s_is_fullscreen[id]) {
+            glfwGetWindowPos(window, &s_win_x[id], &s_win_y[id]);
+            glfwGetWindowSize(window, &s_win_w[id], &s_win_h[id]);
+
             GLFWmonitor* monitor = glfwGetPrimaryMonitor();
             const GLFWvidmode* mode = glfwGetVideoMode(monitor);
 
-            // 3. Switch to borderless fullscreen on that monitor
             glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
-            s_is_fullscreen = true;
-            printf("[C-CORE] Native Fullscreen Engaged (%dx%d @ %dHz)\n", mode->width, mode->height, mode->refreshRate);
+            s_is_fullscreen[id] = true;
+            printf("[C-CORE] Window %d Fullscreen Engaged (%dx%d @ %dHz)\n", id, mode->width, mode->height, mode->refreshRate);
         } else {
-            // Restore back to the exact windowed state
-            glfwSetWindowMonitor(window, NULL, s_win_x, s_win_y, s_win_w, s_win_h, 0);
-            s_is_fullscreen = false;
-            printf("[C-CORE] Windowed Mode Restored\n");
+            glfwSetWindowMonitor(window, NULL, s_win_x[id], s_win_y[id], s_win_w[id], s_win_h[id], 0);
+            s_is_fullscreen[id] = false;
+            printf("[C-CORE] Window %d Windowed Mode Restored\n", id);
         }
     }
-    // THE MOUSE RELAY TOGGLE
+
     if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
         int is_cap = atomic_load_explicit(&g_engine.mailbox.mouse_captured, memory_order_acquire);
-        is_cap = !is_cap; // Flip the state
+        is_cap = !is_cap;
         atomic_store_explicit(&g_engine.mailbox.mouse_captured, is_cap, memory_order_release);
 
         if (is_cap) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_CAPTURED);
-            printf("[C-CORE] Mouse Clamped to Window (F10)\n");
+            printf("[C-CORE] Window %d Mouse Clamped\n", id);
         } else {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            printf("[C-CORE] Mouse Freed (F10)\n");
+            printf("[C-CORE] Window %d Mouse Freed\n", id);
         }
     }
+
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_1 || key == GLFW_KEY_2 || key == GLFW_KEY_3 || key == GLFW_KEY_4 || key == GLFW_KEY_F5 || key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
             atomic_store_explicit(&g_engine.mailbox.last_key_pressed, key, memory_order_release);
@@ -285,18 +307,28 @@ EXPORT void vx_sys_eject_validation(void* instance) {
 EXPORT uint32_t vx_input_wasd() { return atomic_load_explicit(&g_engine.mailbox.wasd_mask, memory_order_acquire); }
 EXPORT float vx_input_mouse_dx() { return atomic_exchange_explicit(&g_engine.mailbox.mouse_dx, 0.0f, memory_order_acquire); }
 EXPORT float vx_input_mouse_dy() { return atomic_exchange_explicit(&g_engine.mailbox.mouse_dy, 0.0f, memory_order_acquire); }
-EXPORT int vx_sys_resize_flag() { return atomic_exchange_explicit(&g_engine.mailbox.window_resized, 0, memory_order_acquire); }
-EXPORT void vx_sys_window_size(int* w, int* h) {
-    *w = atomic_load_explicit(&g_engine.mailbox.win_w, memory_order_acquire);
-    *h = atomic_load_explicit(&g_engine.mailbox.win_h, memory_order_acquire);
+
+EXPORT int vx_sys_resize_flag(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
+    return atomic_exchange_explicit(&g_engine.mailbox.window_resized[window_id], 0, memory_order_acquire);
+}
+
+EXPORT void vx_sys_window_size(int window_id, int* w, int* h) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) { *w = 0; *h = 0; return; }
+    *w = atomic_load_explicit(&g_engine.mailbox.win_w[window_id], memory_order_acquire);
+    *h = atomic_load_explicit(&g_engine.mailbox.win_h[window_id], memory_order_acquire);
 }
 
 void glfw_framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     if (width == 0 || height == 0) return;
-    atomic_store_explicit(&g_engine.mailbox.win_w, width, memory_order_release);
-    atomic_store_explicit(&g_engine.mailbox.win_h, height, memory_order_release);
-    atomic_store_explicit(&g_engine.mailbox.window_resized, 1, memory_order_release);
+    int id = (int)(intptr_t)glfwGetWindowUserPointer(window);
+    if (id < 0 || id >= MAX_WINDOWS) return;
+
+    atomic_store_explicit(&g_engine.mailbox.win_w[id], width, memory_order_release);
+    atomic_store_explicit(&g_engine.mailbox.win_h[id], height, memory_order_release);
+    atomic_store_explicit(&g_engine.mailbox.window_resized[id], 1, memory_order_release);
 }
+
 EXPORT int vx_input_spacebar() {
     return atomic_load_explicit(&g_engine.mailbox.key_space, memory_order_acquire);
 }
@@ -777,12 +809,29 @@ void vx_init_mailbox() {
     atomic_init(&g_engine.mailbox.is_running, 1);
     atomic_init(&g_engine.mailbox.lua_finished, 0);
     atomic_init(&g_engine.mailbox.vk_instance, NULL);
-    atomic_init(&g_engine.mailbox.vk_surface, NULL);
+
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        atomic_init(&g_engine.mailbox.glfw_cmd[i], CMD_IDLE);
+        atomic_init(&g_engine.mailbox.glfw_arg_w[i], 0);
+        atomic_init(&g_engine.mailbox.glfw_arg_h[i], 0);
+        atomic_init(&g_engine.mailbox.vk_surface[i], NULL);
+        atomic_init(&g_engine.mailbox.window_resized[i], 0);
+        atomic_init(&g_engine.mailbox.win_w[i], 0);
+        atomic_init(&g_engine.mailbox.win_h[i], 0);
+    }
+
     atomic_init(&g_engine.mailbox.mouse_x, 0.0f);
     atomic_init(&g_engine.mailbox.mouse_y, 0.0f);
-    atomic_init(&g_engine.mailbox.click_x, -1.0f); // Initialize to -1
-    atomic_init(&g_engine.mailbox.click_y, -1.0f); // Initialize to -1
-    atomic_init(&g_engine.mailbox.mouse_captured, 0); // Start Free
+    atomic_init(&g_engine.mailbox.click_x, -1.0f);
+    atomic_init(&g_engine.mailbox.click_y, -1.0f);
+    atomic_init(&g_engine.mailbox.mouse_captured, 0);
+    atomic_init(&g_engine.mailbox.last_key_pressed, 0);
+    atomic_init(&g_engine.mailbox.wasd_mask, 0);
+    atomic_init(&g_engine.mailbox.mouse_dx, 0.0f);
+    atomic_init(&g_engine.mailbox.mouse_dy, 0.0f);
+    atomic_init(&g_engine.mailbox.mouse_left, 0);
+    atomic_init(&g_engine.mailbox.mouse_right, 0);
+    atomic_init(&g_engine.mailbox.key_space, 0);
 }
 
 // --- THE CONSENSUS LUA OVERLORD THREAD ---
@@ -813,72 +862,70 @@ int main(int argc, char** argv) {
 
     vx_init_mailbox();
 
-    atomic_init(&g_engine.mailbox.glfw_cmd, CMD_IDLE);
-    atomic_init(&g_engine.mailbox.last_key_pressed, 0);
-    atomic_init(&g_engine.mailbox.wasd_mask, 0);
-    atomic_init(&g_engine.mailbox.mouse_dx, 0.0f);
-    atomic_init(&g_engine.mailbox.mouse_dy, 0.0f);
-    atomic_init(&g_engine.mailbox.mouse_left, 0);
-    atomic_init(&g_engine.mailbox.mouse_right, 0);
-    atomic_init(&g_engine.mailbox.key_space, 0);
-
     // Launch the Lua VM in a decoupled OS thread using the original safe NULL pattern
     vmath_thread_t lua_thread = vmath_thread_start(lua_co_overlord_loop, NULL);
 
-    GLFWwindow* window = NULL;
+    GLFWwindow* windows[MAX_WINDOWS] = {NULL};
 
     // --- THE OS EVENT PUMP (MAIN THREAD) ---
-    // Preserves your original timing sequence perfectly.
     while (vx_core_is_running()) {
-        if (window) glfwPollEvents();
+        // Poll once per cycle for all open windows
+        glfwPollEvents();
 
-        int cmd = atomic_exchange_explicit(&g_engine.mailbox.glfw_cmd, CMD_IDLE, memory_order_acquire);
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            int cmd = atomic_exchange_explicit(&g_engine.mailbox.glfw_cmd[i], CMD_IDLE, memory_order_acquire);
 
-        if (cmd == CMD_BOOT_WINDOW && window == NULL) {
-            int w = atomic_load_explicit(&g_engine.mailbox.glfw_arg_w, memory_order_relaxed);
-            int h = atomic_load_explicit(&g_engine.mailbox.glfw_arg_h, memory_order_relaxed);
+            if (cmd == CMD_BOOT_WINDOW && windows[i] == NULL) {
+                int w = atomic_load_explicit(&g_engine.mailbox.glfw_arg_w[i], memory_order_relaxed);
+                int h = atomic_load_explicit(&g_engine.mailbox.glfw_arg_h[i], memory_order_relaxed);
 
-            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-            glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-            window = glfwCreateWindow(w, h, "Weaver Engine", NULL, NULL);
-            glfwSetWindowSizeLimits(window, 640, 360, GLFW_DONT_CARE, GLFW_DONT_CARE);
+                glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+                glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-            // --- THE WINDOWS FOCUS OVERRIDE HACK ---
-            glfwShowWindow(window);
-            glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_TRUE);  // Force OS to overlay it
-            glfwFocusWindow(window);                                // Grab the input lock
-            glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_FALSE); // Sink it back to normal
-            glfwPollEvents();                                       // Flush the OS event queue instantly
+                // Allow dynamic title or stick to the universal
+                windows[i] = glfwCreateWindow(w, h, "Weaver Engine", NULL, NULL);
+                glfwSetWindowSizeLimits(windows[i], 640, 360, GLFW_DONT_CARE, GLFW_DONT_CARE);
 
-            glfwSetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
-            glfwSetKeyCallback(window, glfw_key_callback);
-            glfwSetCursorPosCallback(window, glfw_cursor_callback);
-            glfwSetMouseButtonCallback(window, glfw_mouse_button_callback);
+                // Bind ID for callbacks
+                glfwSetWindowUserPointer(windows[i], (void*)(intptr_t)i);
 
-            int fb_w, fb_h;
-            glfwGetFramebufferSize(window, &fb_w, &fb_h);
-            atomic_store_explicit(&g_engine.mailbox.win_w, fb_w, memory_order_release);
-            atomic_store_explicit(&g_engine.mailbox.win_h, fb_h, memory_order_release);
+                // --- THE WINDOWS FOCUS OVERRIDE HACK ---
+                glfwShowWindow(windows[i]);
+                glfwSetWindowAttrib(windows[i], GLFW_FLOATING, GLFW_TRUE);
+                glfwFocusWindow(windows[i]);
+                glfwSetWindowAttrib(windows[i], GLFW_FLOATING, GLFW_FALSE);
+                glfwPollEvents();
 
-            void* instance = atomic_load_explicit(&g_engine.mailbox.vk_instance, memory_order_acquire);
-            if (instance != NULL) {
-                VkSurfaceKHR surface;
-                if (glfwCreateWindowSurface((VkInstance)instance, window, NULL, &surface) == VK_SUCCESS) {
-                    atomic_store_explicit(&g_engine.mailbox.vk_surface, (void*)surface, memory_order_release);
-                    printf("[C-CORE] Window & Surface Created on Lua's Demand!\n");
+                glfwSetFramebufferSizeCallback(windows[i], glfw_framebuffer_size_callback);
+                glfwSetKeyCallback(windows[i], glfw_key_callback);
+                glfwSetCursorPosCallback(windows[i], glfw_cursor_callback);
+                glfwSetMouseButtonCallback(windows[i], glfw_mouse_button_callback);
+
+                int fb_w, fb_h;
+                glfwGetFramebufferSize(windows[i], &fb_w, &fb_h);
+                atomic_store_explicit(&g_engine.mailbox.win_w[i], fb_w, memory_order_release);
+                atomic_store_explicit(&g_engine.mailbox.win_h[i], fb_h, memory_order_release);
+
+                void* instance = atomic_load_explicit(&g_engine.mailbox.vk_instance, memory_order_acquire);
+                if (instance != NULL) {
+                    VkSurfaceKHR surface;
+                    if (glfwCreateWindowSurface((VkInstance)instance, windows[i], NULL, &surface) == VK_SUCCESS) {
+                        atomic_store_explicit(&g_engine.mailbox.vk_surface[i], (void*)surface, memory_order_release);
+                        printf("[C-CORE] Window %d & Surface Created on Lua's Demand!\n", i);
+                    }
                 }
             }
-        }
-        else if (cmd == CMD_KILL_WINDOW && window != NULL) {
-            glfwDestroyWindow(window);
-            window = NULL;
-            atomic_store_explicit(&g_engine.mailbox.vk_surface, NULL, memory_order_release);
-            printf("[C-CORE] Window Destroyed.\n");
-        }
+            else if (cmd == CMD_KILL_WINDOW && windows[i] != NULL) {
+                glfwDestroyWindow(windows[i]);
+                windows[i] = NULL;
+                atomic_store_explicit(&g_engine.mailbox.vk_surface[i], NULL, memory_order_release);
+                printf("[C-CORE] Window %d Destroyed.\n", i);
+            }
 
-        if (window && glfwWindowShouldClose(window)) {
-            atomic_store_explicit(&g_engine.mailbox.last_key_pressed, GLFW_KEY_ESCAPE, memory_order_release);
-            glfwSetWindowShouldClose(window, GLFW_FALSE);
+            if (windows[i] && glfwWindowShouldClose(windows[i])) {
+                atomic_store_explicit(&g_engine.mailbox.last_key_pressed, GLFW_KEY_ESCAPE, memory_order_release);
+                glfwSetWindowShouldClose(windows[i], GLFW_FALSE);
+            }
         }
 
         // Exact original sleep timing
@@ -891,7 +938,9 @@ int main(int argc, char** argv) {
     }
 
     vmath_thread_join(lua_thread);
-    if (window) glfwDestroyWindow(window);
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (windows[i]) glfwDestroyWindow(windows[i]);
+    }
     glfwTerminate();
     printf("[C-CORE] Clean Exit.\n");
     return 0;
