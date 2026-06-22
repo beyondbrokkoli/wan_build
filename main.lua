@@ -15,6 +15,9 @@ local cfg_gfx = require("config_gfx")
 local cfg_sim = require("config_sim")
 local cfg_net = require("config_net")
 
+-- Assign this domain a specific window ID (0 to 3)
+cfg_gfx.win.id = 0 -- 0 for Game, 1 for Editor later
+
 -- 2. BUILD THE MASTER APPLICATION CONTEXT
 local app_ctx = {
     cfg_gfx = cfg_gfx,
@@ -40,8 +43,8 @@ local FSM = require("fsm_core").init(app_ctx, Game) -- FSM is now 100% domain-ag
 
 -- 4. C-CORE INTERFACES
 ffi.cdef[[
-    void* vx_sys_get_surface();
-    void vx_sys_set_cmd(int cmd, int w, int h);
+    void* vx_sys_get_surface(int window_id);
+    void vx_sys_set_cmd(int window_id, int cmd, int w, int h);
     void Sleep(uint32_t dwMilliseconds);
     int usleep(uint32_t usec);
     int vx_core_is_running();
@@ -62,8 +65,8 @@ ffi.cdef[[
     float vx_input_click_x();
     float vx_input_click_y();
     int vx_input_is_captured();
-    int vx_sys_resize_flag();
-    void vx_sys_window_size(int* w, int* h);
+    int vx_sys_resize_flag(int window_id);
+    void vx_sys_window_size(int window_id, int* w, int* h);
     int vx_input_mouse_btn(int btn);
     int vx_input_spacebar();
 
@@ -187,7 +190,7 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
         local host_payload = json_util.encode({
             public_ip = my_pub_ip, public_port = my_pub_port,
             local_ip = my_local_ip, local_port = local_port,
-            target_size = target_size 
+            target_size = target_size
         })
 
         print(string.format("[MATCHMAKER] Requesting new lobby for %d players...", target_size))
@@ -354,10 +357,15 @@ local function boot_weaver()
     local ctx = {}
     for i, stage in ipairs(seq.boot) do
         print(string.format("[WEAVER] Executing Stage %d: %s", i, stage.name))
-        local signal = stage.action(ctx)
+
+        -- [NEW] Catch the second return argument (the window_id)
+        local signal, win_id = stage.action(ctx)
+
         if signal == "AWAIT_SURFACE" then
-            print("[WEAVER] Yielding execution, waiting for C-Core Surface...")
-            while ffi.C.vx_sys_get_surface() == nil do
+            print(string.format("[WEAVER] Yielding execution, waiting for C-Core Surface %d...", win_id))
+
+            -- [NEW] Pass the id to the FFI call
+            while ffi.C.vx_sys_get_surface(win_id) == nil do
                 sys_sleep(10)
                 coroutine.yield()
             end
@@ -387,7 +395,7 @@ local function matrix_raycast_terrain(mouse_x, mouse_y, screen_w, screen_h, view
     dx, dy, dz = dx * inv_mag, dy * inv_mag, dz * inv_mag
 
     local t = 0.0
-    local p = net_identity or 0 
+    local p = net_identity or 0
 
     if dy < 0.0 then
         local dist_to_ceiling = (10.0 - oy) / dy

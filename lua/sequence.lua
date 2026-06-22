@@ -17,25 +17,34 @@ function SequenceModule.init(app_ctx)
             name = "Vulkan Instance",
             action = function(ctx)
                 local vulkan = require("vulkan_core")
-                -- [INJECTED] Pass gfx_cfg dynamically
                 ctx.vk_runtime = vulkan.create_instance(reg.vk_reqs.instance_ext, cfg_gfx.cfg)
-                ffi.cdef("void vx_sys_publish_instance(void* instance);")
-                ffi.C.vx_sys_publish_instance(ctx.vk_runtime.instance)
+
+                -- Note: FFI CDEF should be globally defined, but if you do it locally here:
+                -- ffi.cdef("void vx_sys_publish_instance(int window_id, void* instance);")
+
+                -- [NEW] Pass the dynamic window ID
+                ffi.C.vx_sys_publish_instance(cfg_gfx.win.id, ctx.vk_runtime.instance)
             end
         },
         { -- 2
             name = "GLFW Window Boot",
             action = function(ctx)
-                print("[WEAVER] Ordering C-Core to Boot GLFW Window...")
-                ffi.C.vx_sys_set_cmd(cfg_gfx.sys.boot, cfg_gfx.win.w, cfg_gfx.win.h)
-                return "AWAIT_SURFACE"
+                print(string.format("[WEAVER] Ordering C-Core to Boot Window ID %d...", cfg_gfx.win.id))
+
+                ffi.C.vx_sys_set_cmd(cfg_gfx.win.id, cfg_gfx.sys.boot, cfg_gfx.win.w, cfg_gfx.win.h)
+
+                -- [NEW] Pass the ID out to the coroutine runner
+                return "AWAIT_SURFACE", cfg_gfx.win.id
             end
         },
         { -- 3
             name = "Vulkan Logical Device",
             action = function(ctx)
                 local vulkan = require("vulkan_core")
-                local surface_ptr = ffi.C.vx_sys_get_surface()
+
+                -- [NEW] Get surface for specific window
+                local surface_ptr = ffi.C.vx_sys_get_surface(cfg_gfx.win.id)
+
                 vulkan.finalize_device_and_swapchain(ctx.vk_runtime, surface_ptr, reg.vk_reqs.device_ext)
             end
         },
