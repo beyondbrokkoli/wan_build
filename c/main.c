@@ -836,10 +836,10 @@ void vx_init_mailbox() {
     atomic_init(&g_engine.mailbox.ready_index, 0);
     atomic_init(&g_engine.mailbox.is_running, 1);
     atomic_init(&g_engine.mailbox.lua_finished, 0);
-    atomic_init(&g_engine.mailbox.vk_instance, NULL);
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
         // --- Window State ---
+        atomic_init(&g_engine.mailbox.vk_instance[i], NULL); // <--- MOVED INSIDE THE LOOP
         atomic_init(&g_engine.mailbox.glfw_cmd[i], CMD_IDLE);
         atomic_init(&g_engine.mailbox.glfw_arg_w[i], 0);
         atomic_init(&g_engine.mailbox.glfw_arg_h[i], 0);
