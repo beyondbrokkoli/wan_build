@@ -745,7 +745,8 @@ THREAD_FUNC render_thread_loop(void* arg) {
         VkResult res = pfnAcquire(g_wsi.device, g_wsi.swapchain, UINT64_MAX, g_wsi.image_available[current_frame], VK_NULL_HANDLE, &img_idx);
 
         if (res == VK_ERROR_OUT_OF_DATE_KHR) {
-            atomic_store_explicit(&g_engine.mailbox.window_resized, 1, memory_order_release);
+            // Routed to Window 0. Update this logic when g_wsi is upgraded for multi-swapchain.
+            atomic_store_explicit(&g_engine.mailbox.window_resized[0], 1, memory_order_release);
             SLEEP_MS(10);
             continue;
         }
@@ -947,7 +948,7 @@ int main(int argc, char** argv) {
             }
 
             if (windows[i] && glfwWindowShouldClose(windows[i])) {
-                atomic_store_explicit(&g_engine.mailbox.last_key_pressed, GLFW_KEY_ESCAPE, memory_order_release);
+                atomic_store_explicit(&g_engine.mailbox.last_key_pressed[i], GLFW_KEY_ESCAPE, memory_order_release);
                 glfwSetWindowShouldClose(windows[i], GLFW_FALSE);
             }
         }
