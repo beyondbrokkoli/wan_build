@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdalign.h>
@@ -784,22 +785,32 @@ void vx_init_mailbox() {
     atomic_init(&g_engine.mailbox.mouse_captured, 0); // Start Free
 }
 
+// --- THE CONSENSUS LUA OVERLORD THREAD ---
+// Reverted to the original, pure, zero-overhead boot sequence.
 THREAD_FUNC lua_co_overlord_loop(void* arg) {
     printf("[LUA-OS-THREAD] Booting Lua VM...\n");
     lua_State* L = luaL_newstate();
     luaL_openlibs(L);
+
+    // Engine executes the root main.lua - Lua handles its own package.paths
     if (luaL_dofile(L, "main.lua") != LUA_OK) {
         printf("\n[LUA FATAL ERROR] %s\n", lua_tostring(L, -1));
     }
+
     lua_close(L);
     printf("[LUA-OS-THREAD] VM Destroyed.\n");
     return THREAD_RETURN_VAL;
 }
 
 int main(int argc, char** argv) {
-    printf("[C-CORE] Booting Headless Worker...\n");
+    printf("[C-CORE] Booting Weaver Engine Host...\n");
 
-    if (!glfwInit()) return -1;
+    // Strict OS-Level Display Server requirement
+    if (!glfwInit()) {
+        printf("[C-FATAL] GLFW failed to initialize. Display Server missing?\n");
+        return -1;
+    }
+
     vx_init_mailbox();
 
     atomic_init(&g_engine.mailbox.glfw_cmd, CMD_IDLE);
@@ -811,10 +822,13 @@ int main(int argc, char** argv) {
     atomic_init(&g_engine.mailbox.mouse_right, 0);
     atomic_init(&g_engine.mailbox.key_space, 0);
 
+    // Launch the Lua VM in a decoupled OS thread using the original safe NULL pattern
     vmath_thread_t lua_thread = vmath_thread_start(lua_co_overlord_loop, NULL);
 
     GLFWwindow* window = NULL;
 
+    // --- THE OS EVENT PUMP (MAIN THREAD) ---
+    // Preserves your original timing sequence perfectly.
     while (vx_core_is_running()) {
         if (window) glfwPollEvents();
 
@@ -826,7 +840,7 @@ int main(int argc, char** argv) {
 
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
             glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-            window = glfwCreateWindow(w, h, "VX Engine Remote", NULL, NULL);
+            window = glfwCreateWindow(w, h, "Weaver Engine", NULL, NULL);
             glfwSetWindowSizeLimits(window, 640, 360, GLFW_DONT_CARE, GLFW_DONT_CARE);
 
             // --- THE WINDOWS FOCUS OVERRIDE HACK ---
@@ -859,13 +873,15 @@ int main(int argc, char** argv) {
             glfwDestroyWindow(window);
             window = NULL;
             atomic_store_explicit(&g_engine.mailbox.vk_surface, NULL, memory_order_release);
-            printf("[C-CORE] Window Destroyed. Running Headless...\n");
+            printf("[C-CORE] Window Destroyed.\n");
         }
 
         if (window && glfwWindowShouldClose(window)) {
             atomic_store_explicit(&g_engine.mailbox.last_key_pressed, GLFW_KEY_ESCAPE, memory_order_release);
             glfwSetWindowShouldClose(window, GLFW_FALSE);
         }
+
+        // Exact original sleep timing
         SLEEP_MS(1);
     }
 

@@ -1,169 +1,235 @@
 local ffi = require("ffi")
 local bit = require("bit")
-local cfg = require("config_engine")
 local net = require("network")
-local cfg_net = require("config_net") -- [!] ADDED: The Registry
 
-local CHAOS_PACKET_LOSS = 0.0
 local Pump = {}
--- [!] NEW: Persistent Omnibus outgoing buffer
-local global_out_pkt = ffi.new("LockstepPacket")
 
-function Pump.send_dynamic_history(ctx)
-    local current_tick = ctx.rollback_arena.head_tick
-    local conf_tick = ctx.rollback_arena.confirmed_tick
+-- The module only initializes when main.lua injects the Application Context
+function Pump.init(app_ctx)
+    -- 1. CACHE LUAJIT UPVALUES (Zero-cost lookups in hot loops)
+    local RING_MASK       = app_ctx.cfg_net.RING_MASK
+    local HISTORY_HORIZON = app_ctx.cfg_net.HISTORY_HORIZON
+    local HISTORY_LEN     = app_ctx.cfg_net.HISTORY_LEN
+    local MAX_PLAYERS     = app_ctx.cfg_net.MAX_PLAYERS
+    local DESYNC_SWEEP    = app_ctx.cfg_net.DESYNC_SWEEP
 
-    -- Zero the persistent memory block instead of allocating
-    ffi.fill(global_out_pkt, ffi.sizeof("LockstepPacket"), 0)
-    local pkt = global_out_pkt
+    -- The Domain Boundary: Safely grabbing the flag from the active domain
+    local STATE_EMPTY     = app_ctx.cfg_net.net_state.empty
 
-    pkt.session_token = ctx.session_token
-    pkt.player_id = ctx.net_identity
-    pkt.frame_tick = current_tick
+    local CHAOS_PACKET_LOSS = 0.0
 
-    if conf_tick > 0 and ctx.rollback_arena.is_rollback_active == 0 then
-        local conf_idx = bit.band(conf_tick, cfg_net.RING_MASK)
-        pkt.state_checksum = ctx.rollback_arena.frames[conf_idx].state_checksum
-        pkt.checksum_tick = conf_tick
-    end
+    -- 2. PERSISTENT BUFFERS (Safely scoped to this engine instance)
+    -- Note: This requires 'structs.lua' to be loaded in main.lua prior to init.
+    local max_packet_size = 2048
+    local tx_buffer = ffi.new("uint8_t[?]", max_packet_size)
+    local header_size = ffi.offsetof("LockstepPacket", "commands")
 
-    -- [!] The Golden Ratio Baseline
-    local needed_base = math.max(1, current_tick - cfg_net.HISTORY_HORIZON)
-    local history_len = current_tick - needed_base + 1
+    local global_out_pkt = ffi.new("LockstepPacket")
+    local scratch_in_pkt = ffi.new("LockstepPacket") -- Decompression target
 
-    if history_len > cfg_net.HISTORY_LEN then
-        history_len = cfg_net.HISTORY_LEN
-    end
+    local MAX_BURST_PACKETS = app_ctx.cfg_net.MAX_BURST_PACKETS
+    local global_in_buffer = ffi.new("RxPacket[?]", MAX_BURST_PACKETS)
 
-    pkt.base_tick = needed_base
-    pkt.history_count = history_len
+    -- 3. THE EXECUTABLE CLOSURE
+    return {
+        send_dynamic_history = function(ctx)
+            local current_tick = ctx.rollback_arena.head_tick
+            local conf_tick = ctx.rollback_arena.confirmed_tick
 
-    -- Omnibus: Pack ACKs for the entire lobby
-    for p = 0, cfg_net.MAX_PLAYERS - 1 do
-        if p ~= ctx.net_identity and ctx.peer_active[p] then
-            pkt.peer_acks[p] = ctx.peer_highest_tick[p]
-        end
-    end
+            ffi.fill(global_out_pkt, ffi.sizeof("LockstepPacket"), 0)
+            local pkt = global_out_pkt
 
-    for i = 0, history_len - 1 do
-        local h_tick = needed_base + i
-        local h_idx = bit.band(h_tick, cfg_net.RING_MASK)
-        local frame = ctx.rollback_arena.frames[h_idx]
+            pkt.session_token = ctx.session_token
+            pkt.player_id = ctx.net_identity
+            pkt.frame_tick = current_tick
 
-        -- High performance 16-byte contiguous array copy
-        local src_ptr = ffi.cast("uint64_t*", frame.commands[ctx.net_identity])
-        local dst_ptr = ffi.cast("uint64_t*", pkt.commands[i])
-        dst_ptr[0] = src_ptr[0]
-        dst_ptr[1] = src_ptr[1]
-    end
-
-    -- Topology Routing: P2P + Single Dedicated Relay Megaphone
-    local needs_relay = false
-    for p = 0, cfg_net.MAX_PLAYERS - 1 do
-        if p ~= ctx.net_identity and ctx.peer_active[p] then
-            if ctx.p2p_established and ctx.p2p_established[p] then
-                net.SendTo(pkt, p) -- Direct P2P Blast
-            else
-                needs_relay = true
-            end
-        end
-    end
-
-    -- [!] FIRE THE MEGAPHONE
-    -- Send exactly one packet to the pristine Dedicated Relay Socket (Index 8)
-    if needs_relay then
-        net.SendTo(pkt, cfg_net.MAX_PLAYERS)
-    end
-end
-
-local MAX_BURST_PACKETS = 256
-local global_in_buffer = ffi.new("LockstepPacket[?]", MAX_BURST_PACKETS)
-
-function Pump.intercept_network(ctx, current_tick)
-    local count = net.RecvAll(global_in_buffer, MAX_BURST_PACKETS)
-
-    for i = 0, count - 1 do
-        local pkt = global_in_buffer[i]
-        local pid = pkt.player_id
-
-        -- [!] SSoT: Echo Drop & Omnibus ACK Extraction
-        -- Discard our own broadcast megaphone echoes bouncing back from the Python relay.
-        if pid == ctx.net_identity then
-            goto continue_inbox
-        end
-
-        if pkt.frame_tick < ctx.rollback_arena.confirmed_tick then
-            goto continue_inbox
-        end
-
-        if pid < cfg_net.MAX_PLAYERS and pkt.frame_tick >= 0 and ctx.peer_active[pid] then
-            local relevant_ack = pkt.peer_acks[ctx.net_identity]
-            if relevant_ack > ctx.peer_ack_of_me[pid] then
-                ctx.peer_ack_of_me[pid] = relevant_ack
+            if conf_tick > 0 and ctx.rollback_arena.is_rollback_active == 0 then
+                local conf_idx = bit.band(conf_tick, RING_MASK)
+                pkt.state_checksum = ctx.rollback_arena.frames[conf_idx].state_checksum
+                pkt.checksum_tick = conf_tick
             end
 
-            local window_start = math.max(0, current_tick - cfg_net.HISTORY_HORIZON)
-            local window_end = math.min(current_tick + cfg_net.RING_MASK, ctx.rollback_arena.confirmed_tick + cfg_net.RING_MASK)
+            local needed_base = math.max(1, current_tick - HISTORY_HORIZON)
+            local history_len = current_tick - needed_base + 1
 
-            for h = 0, pkt.history_count - 1 do
-                local h_tick = pkt.base_tick + h
+            if history_len > HISTORY_LEN then
+                history_len = HISTORY_LEN
+            end
 
-                if h_tick > ctx.rollback_arena.confirmed_tick and h_tick >= window_start and h_tick <= window_end then
-                    local h_idx = bit.band(h_tick, cfg_net.RING_MASK)
-                    local h_frame = ctx.rollback_arena.frames[h_idx]
+            pkt.base_tick = needed_base
+            pkt.history_count = history_len
 
-                    if h_frame.tick ~= h_tick then
-                        h_frame.tick = h_tick
-                        h_frame.state = cfg.net_state.empty
-                        for p_scan = 0, cfg_net.MAX_PLAYERS - 1 do
-                            h_frame.commands[p_scan][0].opcode = 0
-                            h_frame.commands[p_scan][1].opcode = 0
+            for p = 0, MAX_PLAYERS - 1 do
+                if p ~= ctx.net_identity and ctx.peer_active[p] then
+                    pkt.peer_acks[p] = ctx.peer_highest_tick[p]
+                end
+            end
+
+            -- 1. Populate the raw structs as usual
+            for i = 0, history_len - 1 do
+                local h_tick = needed_base + i
+                local h_idx = bit.band(h_tick, RING_MASK)
+                local frame = ctx.rollback_arena.frames[h_idx]
+
+                local src_ptr = ffi.cast("uint64_t*", frame.commands[ctx.net_identity])
+                local dst_ptr = ffi.cast("uint64_t*", pkt.commands[i])
+                dst_ptr[0] = src_ptr[0]
+                dst_ptr[1] = src_ptr[1]
+            end
+
+            -- RLE COMPRESSION PASS
+            ffi.copy(tx_buffer, pkt, header_size)
+            local offset = header_size
+            local current_run_count = 0
+            local current_cmd_ptr = nil
+
+            for i = 0, history_len - 1 do
+                local cmd_ptr = ffi.cast("uint64_t*", pkt.commands[i])
+
+                if current_run_count == 0 then
+                    current_cmd_ptr = cmd_ptr
+                    current_run_count = 1
+                elseif current_cmd_ptr[0] == cmd_ptr[0] and current_cmd_ptr[1] == cmd_ptr[1] then
+                    current_run_count = current_run_count + 1
+                    if current_run_count == 255 then
+                        tx_buffer[offset] = current_run_count
+                        ffi.copy(tx_buffer + offset + 1, current_cmd_ptr, 16)
+                        offset = offset + 17
+                        current_run_count = 0
+                    end
+                else
+                    tx_buffer[offset] = current_run_count
+                    ffi.copy(tx_buffer + offset + 1, current_cmd_ptr, 16)
+                    offset = offset + 17
+
+                    current_cmd_ptr = cmd_ptr
+                    current_run_count = 1
+                end
+            end
+
+            if current_run_count > 0 then
+                tx_buffer[offset] = current_run_count
+                ffi.copy(tx_buffer + offset + 1, current_cmd_ptr, 16)
+                offset = offset + 17
+            end
+
+            local needs_relay = false
+            for p = 0, MAX_PLAYERS - 1 do
+                if p ~= ctx.net_identity and ctx.peer_active[p] then
+                    if ctx.p2p_established and ctx.p2p_established[p] then
+                        net.SendTo(tx_buffer, offset, p) -- Sending compressed buffer + length
+                    else
+                        needs_relay = true
+                    end
+                end
+            end
+
+            if needs_relay then
+                net.SendTo(tx_buffer, offset, MAX_PLAYERS)
+            end
+        end,
+
+        intercept_network = function(ctx, current_tick)
+            local count = net.RecvAll(global_in_buffer, MAX_BURST_PACKETS)
+
+            for i = 0, count - 1 do
+                local rx_pkt = global_in_buffer[i]
+                local pkt = scratch_in_pkt
+
+                -- RLE DECOMPRESSION PASS
+                ffi.copy(pkt, rx_pkt.data, header_size)
+
+                local rx_offset = header_size
+                local cmd_index = 0
+
+                while rx_offset < rx_pkt.len and cmd_index < pkt.history_count do
+                    local run_count = rx_pkt.data[rx_offset]
+                    local cmd_data = rx_pkt.data + rx_offset + 1
+
+                    for r = 0, run_count - 1 do
+                        if cmd_index < pkt.history_count then
+                            ffi.copy(pkt.commands[cmd_index], cmd_data, 16)
+                            cmd_index = cmd_index + 1
                         end
-                        h_frame.state_checksum = 0
-                        h_frame.remote_checksum = 0
+                    end
+                    rx_offset = rx_offset + 17
+                end
+
+                local pid = pkt.player_id
+
+                if pid == ctx.net_identity then
+                    goto continue_inbox
+                end
+
+                if pkt.frame_tick < ctx.rollback_arena.confirmed_tick then
+                    goto continue_inbox
+                end
+
+                if pid < MAX_PLAYERS and pkt.frame_tick >= 0 and ctx.peer_active[pid] then
+                    local relevant_ack = pkt.peer_acks[ctx.net_identity]
+                    if relevant_ack > ctx.peer_ack_of_me[pid] then
+                        ctx.peer_ack_of_me[pid] = relevant_ack
                     end
 
-                    -- Treat 2x 8-byte PlayerCommands as two 64-bit ints for rapid desync detection
-                    local inc_ptr = ffi.cast("uint64_t*", pkt.commands[h])
-                    local h_ptr   = ffi.cast("uint64_t*", h_frame.commands[pid])
+                    local window_start = math.max(0, current_tick - HISTORY_HORIZON)
+                    local window_end = math.min(current_tick + RING_MASK, ctx.rollback_arena.confirmed_tick + RING_MASK)
 
-                    if h_ptr[0] ~= inc_ptr[0] or h_ptr[1] ~= inc_ptr[1] then
-                        if h_tick < current_tick then
-                            if ctx.rollback_arena.is_rollback_active == 0 or h_tick < ctx.rollback_arena.rollback_target then
-                                ctx.rollback_arena.is_rollback_active = 1
-                                ctx.rollback_arena.rollback_target = h_tick
+                    for h = 0, pkt.history_count - 1 do
+                        local h_tick = pkt.base_tick + h
+
+                        if h_tick > ctx.rollback_arena.confirmed_tick and h_tick >= window_start and h_tick <= window_end then
+                            local h_idx = bit.band(h_tick, RING_MASK)
+                            local h_frame = ctx.rollback_arena.frames[h_idx]
+
+                            if h_frame.tick ~= h_tick then
+                                h_frame.tick = h_tick
+                                h_frame.state = STATE_EMPTY
+                                for p_scan = 0, MAX_PLAYERS - 1 do
+                                    h_frame.commands[p_scan][0].opcode = 0
+                                    h_frame.commands[p_scan][1].opcode = 0
+                                end
+                                h_frame.state_checksum = 0
+                                h_frame.remote_checksum = 0
+                            end
+
+                            local inc_ptr = ffi.cast("uint64_t*", pkt.commands[h])
+                            local h_ptr   = ffi.cast("uint64_t*", h_frame.commands[pid])
+
+                            if h_ptr[0] ~= inc_ptr[0] or h_ptr[1] ~= inc_ptr[1] then
+                                if h_tick < current_tick then
+                                    if ctx.rollback_arena.is_rollback_active == 0 or h_tick < ctx.rollback_arena.rollback_target then
+                                        ctx.rollback_arena.is_rollback_active = 1
+                                        ctx.rollback_arena.rollback_target = h_tick
+                                    end
+                                end
+                                h_ptr[0] = inc_ptr[0]
+                                h_ptr[1] = inc_ptr[1]
                             end
                         end
-                        h_ptr[0] = inc_ptr[0]
-                        h_ptr[1] = inc_ptr[1]
+                    end
+
+                    local payload_highest_tick = pkt.base_tick + pkt.history_count - 1
+
+                    if pkt.base_tick <= ctx.peer_highest_tick[pid] + 1 then
+                        if payload_highest_tick > ctx.peer_highest_tick[pid] then
+                            ctx.peer_highest_tick[pid] = payload_highest_tick
+                        end
+                    end
+
+                    if pkt.checksum_tick > 0 and pkt.checksum_tick >= math.max(0, ctx.rollback_arena.confirmed_tick - DESYNC_SWEEP) and pkt.checksum_tick <= current_tick then
+                        local c_idx = bit.band(pkt.checksum_tick, RING_MASK)
+                        local c_frame = ctx.rollback_arena.frames[c_idx]
+
+                        if c_frame.tick == pkt.checksum_tick then
+                            c_frame.remote_checksum = pkt.state_checksum
+                        end
                     end
                 end
-            end
 
-            local payload_highest_tick = pkt.base_tick + pkt.history_count - 1
-
-            -- [!] FIXED: The Contiguous ACK Guard
-            -- Only advance consensus if the incoming packet perfectly overlaps or connects 
-            -- to our currently verified timeline. If pkt.base_tick is floating in the future, 
-            -- it means packets arrived out of order and we have a hole in reality.
-            if pkt.base_tick <= ctx.peer_highest_tick[pid] + 1 then
-                if payload_highest_tick > ctx.peer_highest_tick[pid] then
-                    ctx.peer_highest_tick[pid] = payload_highest_tick
-                end
-            end
-
-            if pkt.checksum_tick > 0 and pkt.checksum_tick >= math.max(0, ctx.rollback_arena.confirmed_tick - cfg_net.DESYNC_SWEEP) and pkt.checksum_tick <= current_tick then
-                local c_idx = bit.band(pkt.checksum_tick, cfg_net.RING_MASK)
-                local c_frame = ctx.rollback_arena.frames[c_idx]
-
-                if c_frame.tick == pkt.checksum_tick then
-                    c_frame.remote_checksum = pkt.state_checksum
-                end
+                ::continue_inbox::
             end
         end
-
-        ::continue_inbox::
-    end
+    }
 end
 
 return Pump

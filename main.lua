@@ -3,46 +3,81 @@ package.path = "./lua/?.lua;" .. package.path
 
 local ffi = require("ffi")
 local bit = require("bit")
+local json_util = require("json_util")
+
+-- 1. BOOTSTRAP SSOT MEMORY LAYOUTS FIRST
 local structs = require("structs")
+local reg_vk  = require("registry_vk")
+
+-- STRICT DOMAIN ISOLATION REQUIRES:
+-- Only main.lua is allowed to do this.
+local cfg_gfx = require("config_gfx")
+local cfg_sim = require("config_sim")
+local cfg_net = require("config_net")
+
+-- 2. BUILD THE MASTER APPLICATION CONTEXT
+local app_ctx = {
+    cfg_gfx = cfg_gfx,
+    cfg_sim = cfg_sim,
+    cfg_net = cfg_net
+}
+
+-- 3. INJECT CONTEXT INTO DECOUPLED MODULES
+
+local math = require("math")
+local vmath = require("vmath")
+local manifest = require("pipeline_manifest")
 local net = require("network")
-local cfg = require("config_engine")
-local cfg_net = require("config_net") -- [!] ADDED: SSoT Registry
-local FSM = require("fsm_core")
-local Pump = require("net_pump")
-local Game = require("game_state")
+local Fixed = require("fixed_math")
 
-local Engine = {}
-function Engine.SubmitCommand(ctx, opcode, flags, target_id, target_pos)
-    local c_idx = bit.band(ctx.sim_tick_count, cfg_net.RING_MASK)
-    local pending_frame = ctx.rollback_arena.frames[c_idx]
-    local cmds = pending_frame.commands[ctx.net_identity]
+local seq = require("sequence").init(app_ctx)
+local render_queue = require("render_queue").init(app_ctx)
 
-    if cmds[0].opcode == 0 then
-        cmds[0].opcode = opcode; cmds[0].flags = flags
-        cmds[0].target_id = target_id; cmds[0].target_pos = target_pos
-    elseif cmds[1].opcode == 0 then
-        cmds[1].opcode = opcode; cmds[1].flags = flags
-        cmds[1].target_id = target_id; cmds[1].target_pos = target_pos
-    else
-        print("[WARNING] Engine Command Buffer saturated for tick " .. ctx.sim_tick_count)
-    end
-end
+-- The Domain & Temporal Engine
+local Game = require("game_state").init(app_ctx)
+local Pump = require("net_pump").init(app_ctx)
+local FSM = require("fsm_core").init(app_ctx, Game) -- FSM is now 100% domain-agnostic
 
+-- 4. C-CORE INTERFACES
 ffi.cdef[[
+    void* vx_sys_get_surface();
+    void vx_sys_set_cmd(int cmd, int w, int h);
     void Sleep(uint32_t dwMilliseconds);
     int usleep(uint32_t usec);
+    int vx_core_is_running();
+    void vx_core_shutdown();
+    void vx_core_mark_finished();
+
     int QueryPerformanceCounter(int64_t *lpPerformanceCount);
     int QueryPerformanceFrequency(int64_t *lpFrequency);
     typedef struct { long tv_sec; long tv_nsec; } timespec;
     int clock_gettime(int clk_id, timespec *tp);
+
+    int vx_input_last_key();
+    uint32_t vx_input_wasd();
+    float vx_input_mouse_dx();
+    float vx_input_mouse_dy();
+    float vx_input_mouse_x();
+    float vx_input_mouse_y();
+    float vx_input_click_x();
+    float vx_input_click_y();
+    int vx_input_is_captured();
+    int vx_sys_resize_flag();
+    void vx_sys_window_size(int* w, int* h);
+    int vx_input_mouse_btn(int btn);
+    int vx_input_spacebar();
+
+    int vx_stream_acquire();
+    RenderPacket* vx_stream_packet(int idx);
+    void vx_stream_commit(int idx);
+    void vx_thread_kill();
+
+    typedef struct __attribute__((aligned(16))) { float x, y, z, w; } vec4_t;
 ]]
 
+-- --- UTILITY & TIMING ---
 local function sys_sleep(ms)
-    if jit.os == "Windows" then
-        ffi.C.Sleep(ms)
-    else
-        ffi.C.usleep(ms * 1000)
-    end
+    if jit.os == "Windows" then ffi.C.Sleep(ms) else ffi.C.usleep(ms * 1000) end
 end
 
 local get_time_hires
@@ -57,13 +92,15 @@ if jit.os == "Windows" then
         return tonumber(count[0]) * inv_freq
     end
 else
+    local CLOCK_MONOTONIC = 1
     get_time_hires = function()
         local ts = ffi.new("timespec")
-        ffi.C.clock_gettime(1, ts) -- CLOCK_MONOTONIC
+        ffi.C.clock_gettime(CLOCK_MONOTONIC, ts)
         return tonumber(ts.tv_sec) + (tonumber(ts.tv_nsec) * 1e-9)
     end
 end
 
+-- --- NETWORK HTTP HELPERS ---
 local function http_post(url, json_payload)
     local payload_path = "matchmaker_payload.json"
     local f = assert(io.open(payload_path, "w"), "Failed to open temp file")
@@ -117,20 +154,7 @@ local function extract_true_64bit_token(json_string)
     return val
 end
 
-local json = require("json_util")
-
-print("Enter Node ID (0-7) OR Preferred Local Port (e.g., 50000): ")
-io.write("> ")
-local user_input = tonumber(io.read("*l")) or 50000
-
-local local_port = user_input
-if local_port < 1000 then
-    local_port = 50000 + local_port
-end
-
-assert(net.Host(local_port), "FATAL: Failed to bind local socket port " .. local_port)
-local my_local_ip = get_local_ip()
-
+-- --- NETWORK BOOTSTRAP ---
 local function BootstrapNetworkTopology(local_port, my_local_ip)
     print(string.format("[STUN] Querying external NAT edges at %s:%d...", cfg_net.STUN_SERVER, cfg_net.STUN_PORT))
     local stun_ok, my_pub_ip, my_pub_port = net.StunPunch(cfg_net.STUN_SERVER, cfg_net.STUN_PORT)
@@ -149,16 +173,27 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
 
     local lobby_id = ""
     local session_token = nil
-    local initial_payload = json.encode({
+    local initial_payload = json_util.encode({
         public_ip = my_pub_ip, public_port = my_pub_port,
         local_ip = my_local_ip, local_port = local_port
     })
 
     if mode_input == "H" then
-        print("[MATCHMAKER] Requesting new lobby...")
-        local response = http_post(cfg_net.MATCHMAKER_URL .. "/host", initial_payload)
+        print("Enter Target Lobby Size (2-8):")
+        io.write("> ")
+        local target_size = tonumber(io.read("*l")) or 2
+        target_size = math.max(2, math.min(8, target_size))
+
+        local host_payload = json_util.encode({
+            public_ip = my_pub_ip, public_port = my_pub_port,
+            local_ip = my_local_ip, local_port = local_port,
+            target_size = target_size 
+        })
+
+        print(string.format("[MATCHMAKER] Requesting new lobby for %d players...", target_size))
+        local response = http_post(cfg_net.MATCHMAKER_URL .. "/host", host_payload)
         session_token = extract_true_64bit_token(response)
-        lobby_id = json.decode(response).lobby_id
+        lobby_id = json_util.decode(response).lobby_id
         print("[MATCHMAKER] Hosted Lobby, holding room: " .. lobby_id)
     else
         if mode_input == "J" then
@@ -178,7 +213,7 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
     while true do
         local raw_res = http_get(cfg_net.MATCHMAKER_URL .. "/status/" .. lobby_id)
         if raw_res and raw_res ~= "" then
-            status_data = json.decode(raw_res)
+            status_data = json_util.decode(raw_res)
             if status_data.status == "locked" then
                 print(string.format("[MATCHMAKER] Quorum reached (%d/%d). Lobby is LOCKED.", status_data.player_count, cfg_net.MAX_PLAYERS))
                 break
@@ -222,7 +257,11 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
 
     if real_time_remaining > 0 then
         print(string.format("[ICE] Quorum locked. Initiating Mutual Handshake for %.2f seconds...", real_time_remaining))
-        local handshake_buffer = ffi.new("LockstepPacket[32]")
+
+        local header_size = ffi.offsetof("LockstepPacket", "commands")
+        local scratch_handshake = ffi.new("LockstepPacket")
+        local handshake_buffer = ffi.new("RxPacket[32]")
+
         local p2p_heard = {}
 
         while (get_time_hires() - sync_start_time) < real_time_remaining do
@@ -232,17 +271,21 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
                     ping_pkt.session_token = session_token
                     ping_pkt.player_id = local_id
                     ping_pkt.frame_tick = p2p_heard[peer_id] and 1 or 0
-                    net.SendTo(ping_pkt, peer_id)
+
+                    net.SendTo(ping_pkt, header_size, peer_id)
                 end
             end
 
             local count = net.RecvAll(handshake_buffer, 32)
             for i = 0, count - 1 do
-                local pkt = handshake_buffer[i]
-                if pkt.session_token == session_token then
-                    local sender = pkt.player_id
+                local rx_pkt = handshake_buffer[i]
+
+                ffi.copy(scratch_handshake, rx_pkt.data, header_size)
+
+                if scratch_handshake.session_token == session_token then
+                    local sender = scratch_handshake.player_id
                     p2p_heard[sender] = true
-                    if pkt.frame_tick >= 1 and not p2p_established[sender] then
+                    if scratch_handshake.frame_tick >= 1 and not p2p_established[sender] then
                         p2p_established[sender] = true
                         print(string.format("[ICE] Mutual P2P Punch-Through SUCCESS for Node %d!", sender))
                     end
@@ -253,97 +296,32 @@ local function BootstrapNetworkTopology(local_port, my_local_ip)
     end
 
     print("[ICE] Sync window closed. Evaluating routing topologies...")
-
     for peer_id, active in pairs(active_peers) do
         if active then
             if p2p_established[peer_id] then
                 print(string.format("[ROUTING] Node %d -> P2P [DIRECT RESIDENTIAL]", peer_id))
             else
                 print(string.format("[ROUTING] Node %d -> P2P [FAILED]. Tagged for Omnibus Relay.", peer_id))
-                -- [!] FIX: Do NOT overwrite the peer_id socket with the Relay IP.
-                -- Leave it mapped to the dead WAN IP. The net_pump will route
-                -- this player's traffic through the MAX_PLAYERS socket instead.
             end
         end
     end
 
-    -- Bind the Omnibus socket EXACTLY ONCE to Index 8.
     net.SetRelayIP(cfg_net.RELAY_IP)
     net.Connect(cfg_net.MAX_PLAYERS, cfg_net.RELAY_IP, cfg_net.RELAY_PORT)
 
-    -- Force register our NAT mapping with the Relay so it knows where to route
-    -- fallback packets, even if we are strictly P2P right now.
     local reg_pkt = ffi.new("LockstepPacket")
     reg_pkt.session_token = session_token
     reg_pkt.player_id = local_id
     reg_pkt.frame_tick = 0
-    net.SendTo(reg_pkt, cfg_net.MAX_PLAYERS)
+
+    local header_size = ffi.offsetof("LockstepPacket", "commands")
+    net.SendTo(reg_pkt, header_size, cfg_net.MAX_PLAYERS)
 
     print("[SYSTEM] All routes bound. Drop-in complete.")
-
     return session_token, local_id, p2p_established, active_peers, status_data
 end
 
--- Execute the encapsulation
-local session_token, local_id, p2p_established, active_peers, status_data = BootstrapNetworkTopology(local_port, my_local_ip)
-
-local real_time_remaining = status_data.start_time - status_data.server_time
-
-if real_time_remaining > 0 then
-    print(string.format("[SYSTEM] Topology Locked. Sleeping %.2f seconds for global sync...", real_time_remaining))
-    sys_sleep(real_time_remaining * 1000)
-end
-
-local ctx = {
-        session_token = session_token,
-        net_identity = local_id,
-        sim_tick_count = 1,
-        accumulator = 0.0,
-        total_tiles = cfg.world.map_width * cfg.world.map_height,
-        last_bot_tick = 0,
-        p2p_established = p2p_established,
-        peer_active = ffi.new(string.format("bool[%d]", cfg_net.MAX_PLAYERS)),
-        peer_highest_tick = ffi.new(string.format("uint32_t[%d]", cfg_net.MAX_PLAYERS)),
-        peer_ack_of_me = ffi.new(string.format("uint32_t[%d]", cfg_net.MAX_PLAYERS)),
-
-        -- Black Box allocations
-        rts_grid = Game.InitState(session_token),
-        rollback_arena = ffi.new("RollbackBuffer"),
-        snapshot_ring = ffi.new(string.format("%s[%d]", Game.GetStateName(), cfg_net.RING_SIZE))
-    }
-
-local f0 = ctx.rollback_arena.frames[0]
-f0.tick = 0
-for p = 0, cfg_net.MAX_PLAYERS - 1 do
-    f0.commands[p][0].opcode = 0
-    f0.commands[p][1].opcode = 0
-end
-
-ctx.rollback_arena.head_tick = 0
-ctx.rollback_arena.confirmed_tick = 0
-
-for p = 0, cfg_net.MAX_PLAYERS - 1 do
-    if p ~= local_id then
-        ctx.peer_active[p] = true
-    end
-end
-
-ffi.copy(ctx.snapshot_ring[0], ctx.rts_grid, Game.GetStateSize())
-f0.state_checksum = Game.HashState(ctx.rts_grid)
-
-local FIXED_DT = 1.0 / cfg_net.TICK_RATE
-local last_time = get_time_hires()
-local next_debug_print = last_time + 1.0
-
-print("[SYSTEM] Drop-in complete. Entering pristine FSM loop.")
-
-while true do
-    current_time = get_time_hires()
-    local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
-    last_time = current_time
-
-    Pump.intercept_network(ctx, ctx.sim_tick_count)
-
+local function EngineSubmitCommand(ctx, opcode, flags, target_id, target_pos)
     local c_idx = bit.band(ctx.sim_tick_count, cfg_net.RING_MASK)
     local pending_frame = ctx.rollback_arena.frames[c_idx]
 
@@ -359,40 +337,420 @@ while true do
         pending_frame.remote_peer_id = 0
     end
 
-    if ctx.sim_tick_count % 120 == (ctx.net_identity * 10) then
-        if ctx.last_bot_tick ~= ctx.sim_tick_count then
-            Engine.SubmitCommand(ctx, 1, 0, 0, math.random(0, ctx.total_tiles - 1))
-            ctx.last_bot_tick = ctx.sim_tick_count
+    local cmds = pending_frame.commands[ctx.net_identity]
+
+    if cmds[0].opcode == 0 then
+        cmds[0].opcode = opcode; cmds[0].flags = flags
+        cmds[0].target_id = target_id; cmds[0].target_pos = target_pos
+    elseif cmds[1].opcode == 0 then
+        cmds[1].opcode = opcode; cmds[1].flags = flags
+        cmds[1].target_id = target_id; cmds[1].target_pos = target_pos
+    else
+        print("[WARNING] Engine Command Buffer saturated for tick " .. ctx.sim_tick_count)
+    end
+end
+
+local function boot_weaver()
+    local ctx = {}
+    for i, stage in ipairs(seq.boot) do
+        print(string.format("[WEAVER] Executing Stage %d: %s", i, stage.name))
+        local signal = stage.action(ctx)
+        if signal == "AWAIT_SURFACE" then
+            print("[WEAVER] Yielding execution, waiting for C-Core Surface...")
+            while ffi.C.vx_sys_get_surface() == nil do
+                sys_sleep(10)
+                coroutine.yield()
+            end
+        end
+    end
+    return ctx
+end
+
+local temp_vec_near = ffi.new("vec4_t")
+local temp_vec_far = ffi.new("vec4_t")
+
+local function matrix_raycast_terrain(mouse_x, mouse_y, screen_w, screen_h, viewProj_inv, grid, net_identity)
+    local nx = (mouse_x / screen_w) * 2.0 - 1.0
+    local ny = (mouse_y / screen_h) * 2.0 - 1.0
+
+    vmath.multiply_mat4_vec4(viewProj_inv, nx, ny, 0.0, 1.0, temp_vec_near)
+    vmath.multiply_mat4_vec4(viewProj_inv, nx, ny, 1.0, 1.0, temp_vec_far)
+
+    local near_w = 1.0 / temp_vec_near.w
+    local ox, oy, oz = temp_vec_near.x * near_w, temp_vec_near.y * near_w, temp_vec_near.z * near_w
+
+    local far_w = 1.0 / temp_vec_far.w
+    local fx, fy, fz = temp_vec_far.x * far_w, temp_vec_far.y * far_w, temp_vec_far.z * far_w
+
+    local dx, dy, dz = fx - ox, fy - oy, fz - oz
+    local inv_mag = 1.0 / math.sqrt(dx^2 + dy^2 + dz^2)
+    dx, dy, dz = dx * inv_mag, dy * inv_mag, dz * inv_mag
+
+    local t = 0.0
+    local p = net_identity or 0 
+
+    if dy < 0.0 then
+        local dist_to_ceiling = (10.0 - oy) / dy
+        if dist_to_ceiling > 0.0 then t = dist_to_ceiling end
+    end
+
+    for i = 1, 100 do
+        local px = ox + dx * t
+        local py = oy + dy * t
+        local pz = oz + dz * t
+
+        local grid_x = math.floor((px + cfg_sim.world.offset_x) / cfg_sim.world.spacing + 0.5)
+        local grid_z = math.floor((pz + cfg_sim.world.offset_z) / cfg_sim.world.spacing + 0.5)
+
+        if grid_x >= 0 and grid_x < cfg_sim.world.map_width and grid_z >= 0 and grid_z < cfg_sim.world.map_height then
+            local idx = grid_z * cfg_sim.world.map_width + grid_x
+
+            local max_elevation = 0
+            for peer = 0, 7 do
+                local peer_elev = grid.elevation[peer][idx]
+                if peer_elev > max_elevation then
+                    max_elevation = peer_elev
+                end
+            end
+
+            local float_elevation = Fixed.to_float(max_elevation)
+
+            if py <= float_elevation + 0.1 then return idx end
+        end
+        t = t + (cfg_sim.world.spacing * 0.1)
+    end
+    return 65535
+end
+
+local function main()
+    -- 1. Bind Sockets & Bootstrap Network FIRST
+    print("Enter Node ID (0-7) OR Preferred Local Port (e.g., 50000): ")
+    io.write("> ")
+    local user_input = tonumber(io.read("*l")) or 50000
+
+    local local_port = user_input
+    if local_port < 1000 then
+        local_port = 50000 + local_port
+    end
+
+    assert(net.Host(local_port), "FATAL: Failed to bind local socket port " .. local_port)
+    local my_local_ip = get_local_ip()
+
+    local session_token, local_id, p2p_established, active_peers, status_data = BootstrapNetworkTopology(local_port, my_local_ip)
+
+    local ctx = {
+        session_token = session_token,
+        net_identity = local_id,
+        sim_tick_count = 1,
+        accumulator = 0.0,
+        net_accumulator = 0.0,
+        total_tiles = cfg_sim.world.map_width * cfg_sim.world.map_height,
+        p2p_established = p2p_established,
+        peer_active = ffi.new(string.format("bool[%d]", cfg_net.MAX_PLAYERS)),
+        peer_highest_tick = ffi.new(string.format("uint32_t[%d]", cfg_net.MAX_PLAYERS)),
+        peer_ack_of_me = ffi.new(string.format("uint32_t[%d]", cfg_net.MAX_PLAYERS)),
+        rts_grid = Game.InitState(session_token),
+        rollback_arena = ffi.new("RollbackBuffer"),
+        snapshot_ring = ffi.new(string.format("%s[%d]", Game.GetStateName(), cfg_net.RING_SIZE))
+    }
+
+    for p = 0, cfg_net.MAX_PLAYERS - 1 do
+        if p < #status_data.players then
+            ctx.peer_active[p] = true
+        else
+            ctx.peer_active[p] = false
         end
     end
 
-    ctx.accumulator = ctx.accumulator + frame_time
-    FSM.tick_playing_state(ctx, FIXED_DT)
+    print("[LUA IO] Booting Headless Weaver (LABORATORY)...")
+    local co = coroutine.create(boot_weaver)
 
-    Pump.send_dynamic_history(ctx)
+    local status, engine_ctx
+    while coroutine.status(co) ~= "dead" do
+        status, engine_ctx = coroutine.resume(co)
+        if not status then error("Fatal Weaver Crash: " .. tostring(engine_ctx)) end
+    end
 
-    if current_time >= next_debug_print then
-        local display_idx = bit.band(ctx.sim_tick_count - 1, cfg_net.RING_MASK)
-        local display_checksum = ctx.rollback_arena.frames[display_idx].state_checksum or 0
-        local missing_frames = ctx.sim_tick_count - ctx.rollback_arena.confirmed_tick
+    print("[LUA IO] Weaver sequence complete! Unpacking Context...")
 
-        local tracker_str = ""
-        for p = 0, cfg_net.MAX_PLAYERS - 1 do
-            if p ~= ctx.net_identity then
-                tracker_str = tracker_str .. string.format("P%d:%d ", p, ctx.peer_highest_tick[p])
+    local vk_rt = engine_ctx.vk_runtime
+    local sc = engine_ctx.sc_state
+    local desc = engine_ctx.desc_state
+    local gfx = engine_ctx.gfx_state
+    local sync = engine_ctx.sync_state
+    local memory = require("memory")
+
+    print("[LUA CO] Initializing VRAM Index Buffer with Strict Topology...")
+    local index_ptr = ffi.cast("uint32_t*", memory.Mapped["MASTER_INDEX_BLOCK"])
+
+    local iso_indices = ffi.new("uint32_t[36]", {
+        0, 2, 3,
+        0, 3, 4,
+        0, 4, 5,
+        0, 5, 2,
+        2, 6, 7,
+        2, 7, 3,
+        3, 7, 11,
+        3, 11, 4,
+        4, 11, 10,
+        4, 10, 5,
+        5, 10, 6,
+        5, 6, 2
+    })
+
+    ffi.copy(index_ptr, iso_indices, 36 * 4)
+
+    print("[LUA CO] Allocating Direct FFI Render Queues...")
+    local MAX_DRAW_COMMANDS = 1024
+    local render_queues = ffi.new("DrawCommand[?]", MAX_DRAW_COMMANDS * cfg_gfx.cfg.frame_slots)
+
+    local frame_count = 0
+    local vmath = require("vmath")
+
+    local pc = ffi.new("PushConstants")
+    pc.aos_current_idx, pc.aos_prev_idx = 0, 0
+    pc.dt = 0.0
+
+    local camera_mod = require("camera")
+    local cam = camera_mod.new()
+    local inv_vp = ffi.new("mat4_t")
+
+    local total_time = 0.0
+    local wants_hotswap = false
+
+    local master_ptr = ffi.cast("float*", memory.Mapped["MASTER_GPU_BLOCK"])
+    local active_render_mode = cfg_gfx.mode.dual
+
+    local is_resizing = false
+    local last_resize_time = get_time_hires()
+    local RESIZE_COOLDOWN = 0.25
+    local TICK_RATE = cfg_net.TICK_RATE
+    local FIXED_DT = 1.0 / TICK_RATE
+
+    print("[LUA CO] Packing Data-Driven Color Palette...")
+    local staging_ptr = ffi.cast("float*", memory.Mapped["PALETTE_STAGING"])
+
+    staging_ptr[0] = 0.2; staging_ptr[1] = 0.8; staging_ptr[2] = 0.2; staging_ptr[3] = 1.0
+    staging_ptr[4] = 0.2; staging_ptr[5] = 0.5; staging_ptr[6] = 1.0; staging_ptr[7] = 1.0
+    staging_ptr[8] = 1.0; staging_ptr[9] = 0.2; staging_ptr[10] = 0.2; staging_ptr[11] = 1.0
+
+    staging_ptr[40] = 1.0; staging_ptr[41] = 1.0; staging_ptr[42] = 1.0; staging_ptr[43] = 1.0
+    staging_ptr[44] = 1.0; staging_ptr[45] = 0.0; staging_ptr[46] = 0.0; staging_ptr[47] = 1.0
+    staging_ptr[48] = 0.0; staging_ptr[49] = 0.0; staging_ptr[50] = 1.0; staging_ptr[51] = 1.0
+    staging_ptr[52] = 1.0; staging_ptr[53] = 0.0; staging_ptr[54] = 0.0; staging_ptr[55] = 1.0
+
+    local palette_job_id = memory.TransferAsync("PALETTE_STAGING", "PALETTE_HAVEN", 16384)
+    local palette_ready = false
+
+    print("[LUA CO] Entering Deterministic Rollback Render Loop...")
+
+    local prev_mouse_left = 0
+    local pending_click = 65535
+
+    print("[LUA CO] Pre-computing Universal Geometry Template...")
+    local vram_template = ffi.new("RtsTileInstance[?]", ctx.total_tiles)
+    for z = 0, cfg_sim.world.map_height - 1 do
+        for x = 0, cfg_sim.world.map_width - 1 do
+            local i = z * cfg_sim.world.map_width + x
+            vram_template[i].px = (x * cfg_sim.world.spacing) - cfg_sim.world.offset_x
+            vram_template[i].pz = (z * cfg_sim.world.spacing) - cfg_sim.world.offset_z
+        end
+    end
+
+    local gfx_pipeline_module = require("graphics_pipeline")
+    local pump_deletion_queue = gfx_pipeline_module.PumpDeletionQueue
+
+    print("[NET] Scene loaded. Camera unlocked. Awaiting Timeline Synchronization...")
+
+    local last_time = get_time_hires()
+    local last_heartbeat = get_time_hires()
+
+    while ffi.C.vx_core_is_running() == 1 do
+
+        if ffi.C.vx_sys_resize_flag() == 1 then
+            is_resizing = true
+            last_resize_time = get_time_hires()
+        end
+
+        local current_time = get_time_hires()
+        local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
+        last_time = current_time
+
+        local mouse_left = ffi.C.vx_input_mouse_btn(0)
+        local mouse_x = ffi.C.vx_input_mouse_x()
+        local mouse_y = ffi.C.vx_input_mouse_y()
+
+        if mouse_left == 1 and prev_mouse_left == 0 then
+            local click_x = ffi.C.vx_input_click_x()
+            local click_y = ffi.C.vx_input_click_y()
+
+            local clicked_idx = matrix_raycast_terrain(
+               click_x, click_y, sc.extent.width, sc.extent.height,
+               inv_vp, ctx.rts_grid, ctx.net_identity
+            )
+
+            if clicked_idx ~= 65535 then
+                local is_elevated = false
+                for peer = 0, cfg_net.MAX_PLAYERS - 1 do
+                    if ctx.rts_grid.elevation[peer][clicked_idx] > 0 then
+                        is_elevated = true
+                        break
+                    end
+                end
+
+                if is_elevated then
+                    EngineSubmitCommand(ctx, 2, 0, 0, clicked_idx)
+                else
+                    EngineSubmitCommand(ctx, 1, 0, 0, clicked_idx)
+                end
+            end
+        end
+        prev_mouse_left = mouse_left
+
+        Pump.intercept_network(ctx, ctx.sim_tick_count)
+
+        ctx.accumulator = ctx.accumulator + frame_time
+        ctx.net_accumulator = ctx.net_accumulator + frame_time
+
+        FSM.tick_playing_state(ctx, FIXED_DT)
+
+        if ctx.net_accumulator >= FIXED_DT then
+            Pump.send_dynamic_history(ctx)
+            ctx.net_accumulator = ctx.net_accumulator % FIXED_DT
+        end
+
+        if current_time - last_heartbeat >= 1.0 then
+            last_heartbeat = current_time
+            print(string.format("\n[HEARTBEAT] Sim Tick: %d | Confirmed: %d | Accum: %.4f",
+                ctx.sim_tick_count, ctx.rollback_arena.confirmed_tick, ctx.accumulator))
+
+            for p = 0, cfg_net.MAX_PLAYERS - 1 do
+                if ctx.peer_active[p] and p ~= ctx.net_identity then
+                    print(string.format("  -> [DIAGNOSTIC] Peer %d | Highest Tick: %d | AckOfMe: %d",
+                        p, ctx.peer_highest_tick[p], ctx.peer_ack_of_me[p]))
+                end
             end
         end
 
-        print("[DIAGNOSTIC] Peer Ticks: " .. tracker_str)
-        print(string.format("[HEARTBEAT] SimTick: %d | NetHead: %d | Confirmed: %d | Missing: %d | StateHash: 0x%08X",
-            ctx.sim_tick_count,
-            ctx.rollback_arena.head_tick,
-            ctx.rollback_arena.confirmed_tick,
-            missing_frames,
-            display_checksum
-        ))
+        local last_key = ffi.C.vx_input_last_key()
+        if last_key == cfg_gfx.key.esc then ffi.C.vx_core_shutdown()
+        elseif last_key == cfg_gfx.key.f5 then wants_hotswap = true
+        elseif last_key == cfg_gfx.key.num1 then active_render_mode = cfg_gfx.mode.dual
+        elseif last_key == cfg_gfx.key.num2 then active_render_mode = cfg_gfx.mode.geom
+        elseif last_key == cfg_gfx.key.num3 then active_render_mode = cfg_gfx.mode.points
+        end
 
-        next_debug_print = current_time + 1.0
+        if is_resizing then
+            if (get_time_hires() - last_resize_time) > RESIZE_COOLDOWN then
+                local new_w, new_h = ffi.new("int[1]"), ffi.new("int[1]")
+                ffi.C.vx_sys_window_size(new_w, new_h)
+
+                if new_w[0] > 0 and new_h[0] > 0 then
+                    print("\n[LUA CO] Window Stable. Initiating Mini-Weaver Rebuild...")
+                    ffi.C.vx_thread_kill()
+                    vk_rt.vk.vkDeviceWaitIdle(vk_rt.device)
+
+                    require("graphics_pipeline").Destroy(vk_rt.vk, vk_rt, gfx)
+                    require("renderer").Destroy(vk_rt.vk, vk_rt.device, sync, cfg_gfx.cfg.frame_slots)
+
+                    cfg_gfx.win.w = new_w[0]
+                    cfg_gfx.win.h = new_h[0]
+
+                    local mini_ctx = {
+                        vk_runtime = vk_rt,
+                        desc_state = desc,
+                        old_swapchain = sc.handle
+                    }
+
+                    local resize_co = coroutine.create(function()
+                        for _, stage in ipairs(seq.resize) do
+                            print(string.format("[MINI-WEAVER] Executing: %s", stage.name))
+                            stage.action(mini_ctx)
+                        end
+                        return mini_ctx
+                    end)
+
+                    local status, new_ctx
+                    while coroutine.status(resize_co) ~= "dead" do
+                        status, new_ctx = coroutine.resume(resize_co)
+                        if not status then error("Mini-Weaver Crash: " .. tostring(new_ctx)) end
+                    end
+
+                    require("swapchain").Destroy(vk_rt.vk, vk_rt, sc)
+                    sc = new_ctx.sc_state
+                    gfx = new_ctx.gfx_state
+                    sync = new_ctx.sync_state
+                    seq.boot[10].action(new_ctx)
+
+                    print("[LUA CO] Mini-Weaver Rebuild Complete.\n")
+                    is_resizing = false
+                    last_time = get_time_hires()
+                else
+                    last_resize_time = get_time_hires() - (RESIZE_COOLDOWN * 0.9)
+                end
+            end
+        else
+            if not palette_ready and palette_job_id ~= -1 then
+                if memory.IsTransferComplete(vk_rt, palette_job_id) then
+                    print("[LUA CO] Async Transfer Complete! Palette Haven Online.")
+                    palette_ready = true
+                end
+            end
+
+            total_time = total_time + frame_time
+            pc.total_time = total_time
+
+            camera_mod.update(cam, frame_time, mouse_x, mouse_y, sc.extent.width, sc.extent.height)
+            camera_mod.get_matrices(cam, sc.extent.width, sc.extent.height, pc.viewProj, inv_vp)
+
+            local write_idx = ffi.C.vx_stream_acquire()
+            if write_idx ~= -1 then
+                local alpha = ctx.accumulator / FIXED_DT
+                pc.dt = alpha
+
+                render_queue.PackFrame(write_idx, pc, ctx.rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, ctx.total_tiles, ctx.net_identity)
+
+                if wants_hotswap then
+                    print("\n[LUA] Initiating Lock-Free Shader Hotswap...")
+                    require("graphics_pipeline").HotReloadShaders(vk_rt.vk, vk_rt, gfx, frame_count)
+                    wants_hotswap = false
+                    print("[LUA] Hotswap Complete. New pipelines active.\n")
+                end
+
+                ffi.C.vx_stream_commit(write_idx)
+                pump_deletion_queue(vk_rt.vk, vk_rt, frame_count)
+                frame_count = frame_count + 1
+            end
+        end
+        sys_sleep(1)
     end
-    sys_sleep(1)
+
+    print("\n[LUA IO] Render Loop Terminated. Commencing Teardown...")
+    print("[TEARDOWN] Terminating Async Render Thread and Worker Pool...")
+    ffi.C.vx_thread_kill()
+    vk_rt.vk.vkDeviceWaitIdle(vk_rt.device)
+
+    require("graphics_pipeline").Destroy(vk_rt.vk, vk_rt, gfx)
+    require("compute_pipeline").Destroy(vk_rt.vk, vk_rt, engine_ctx.comp_state)
+    require("descriptors").Destroy(vk_rt.vk, vk_rt.device, desc)
+    require("swapchain").Destroy(vk_rt.vk, vk_rt, sc)
+    require("renderer").Destroy(vk_rt.vk, vk_rt.device, sync, cfg_gfx.cfg.frame_slots)
+
+    print("[TEARDOWN] Freeing VRAM and CPU Memory Arenas...")
+    memory.DestroyBuffer("MASTER_GPU_BLOCK", vk_rt)
+    memory.DestroyBuffer("MASTER_INDEX_BLOCK", vk_rt)
+
+    memory.DestroyBuffer("PALETTE_STAGING", vk_rt)
+    memory.DestroyBuffer("PALETTE_HAVEN", vk_rt)
+
+    net.Shutdown()
+    memory.DestroyTransferSubsystem(vk_rt)
+
+    -- [UPDATED] Pass cfg_gfx.cfg into the destruction sequence
+    require("vulkan_core").Destroy(vk_rt, cfg_gfx.cfg)
+
+    print("[LUA IO] Teardown Complete. Safe Exit.")
 end
+
+main()
+ffi.C.vx_core_mark_finished()
