@@ -73,21 +73,20 @@ typedef struct {
     _Atomic int window_resized[MAX_WINDOWS];
     _Atomic int win_w[MAX_WINDOWS];
     _Atomic int win_h[MAX_WINDOWS];
-    // -----------------------------------
 
-    // Global Input State (Shared across all windows)
-    _Atomic int last_key_pressed;
-    _Atomic uint32_t wasd_mask;
-    _Atomic float mouse_dx;
-    _Atomic float mouse_dy;
-    _Atomic float mouse_x;
-    _Atomic float mouse_y;
-    _Atomic float click_x;
-    _Atomic float click_y;
-    _Atomic int mouse_captured;
-    _Atomic int mouse_left;
-    _Atomic int mouse_right;
-    _Atomic int key_space;
+    // --- MULTI-TENANCY INPUT ARRAYS ---
+    _Atomic int last_key_pressed[MAX_WINDOWS];
+    _Atomic uint32_t wasd_mask[MAX_WINDOWS];
+    _Atomic float mouse_dx[MAX_WINDOWS];
+    _Atomic float mouse_dy[MAX_WINDOWS];
+    _Atomic float mouse_x[MAX_WINDOWS];
+    _Atomic float mouse_y[MAX_WINDOWS];
+    _Atomic float click_x[MAX_WINDOWS];
+    _Atomic float click_y[MAX_WINDOWS];
+    _Atomic int mouse_captured[MAX_WINDOWS];
+    _Atomic int mouse_left[MAX_WINDOWS];
+    _Atomic int mouse_right[MAX_WINDOWS];
+    _Atomic int key_space[MAX_WINDOWS];
 } IPC_Mailbox;
 
 typedef struct {
@@ -116,8 +115,61 @@ EXPORT void vx_sys_set_cmd(int window_id, int cmd, int w, int h) {
     atomic_store_explicit(&g_engine.mailbox.glfw_cmd[window_id], cmd, memory_order_release);
 }
 
-EXPORT int vx_input_last_key() {
-    return atomic_exchange_explicit(&g_engine.mailbox.last_key_pressed, 0, memory_order_acquire);
+EXPORT int vx_input_last_key(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
+    return atomic_exchange_explicit(&g_engine.mailbox.last_key_pressed[window_id], 0, memory_order_acquire);
+}
+
+EXPORT int vx_input_mouse_btn(int window_id, int btn) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
+    if (btn == 0) return atomic_load_explicit(&g_engine.mailbox.mouse_left[window_id], memory_order_acquire);
+    if (btn == 1) return atomic_load_explicit(&g_engine.mailbox.mouse_right[window_id], memory_order_acquire);
+    return 0;
+}
+
+EXPORT float vx_input_mouse_x(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0.0f;
+    return atomic_load_explicit(&g_engine.mailbox.mouse_x[window_id], memory_order_acquire);
+}
+
+EXPORT float vx_input_mouse_y(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0.0f;
+    return atomic_load_explicit(&g_engine.mailbox.mouse_y[window_id], memory_order_acquire);
+}
+
+EXPORT float vx_input_click_x(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return -1.0f;
+    return atomic_load_explicit(&g_engine.mailbox.click_x[window_id], memory_order_acquire);
+}
+
+EXPORT float vx_input_click_y(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return -1.0f;
+    return atomic_load_explicit(&g_engine.mailbox.click_y[window_id], memory_order_acquire);
+}
+
+EXPORT int vx_input_is_captured(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
+    return atomic_load_explicit(&g_engine.mailbox.mouse_captured[window_id], memory_order_acquire);
+}
+
+EXPORT uint32_t vx_input_wasd(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
+    return atomic_load_explicit(&g_engine.mailbox.wasd_mask[window_id], memory_order_acquire);
+}
+
+EXPORT float vx_input_mouse_dx(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0.0f;
+    return atomic_exchange_explicit(&g_engine.mailbox.mouse_dx[window_id], 0.0f, memory_order_acquire);
+}
+
+EXPORT float vx_input_mouse_dy(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0.0f;
+    return atomic_exchange_explicit(&g_engine.mailbox.mouse_dy[window_id], 0.0f, memory_order_acquire);
+}
+
+EXPORT int vx_input_spacebar(int window_id) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
+    return atomic_load_explicit(&g_engine.mailbox.key_space[window_id], memory_order_acquire);
 }
 
 double last_mx[MAX_WINDOWS] = {0.0};
@@ -134,19 +186,19 @@ void glfw_cursor_callback(GLFWwindow* window, double xpos, double ypos) {
         first_mouse[id] = false;
     }
 
-    atomic_store_explicit(&g_engine.mailbox.mouse_x, (float)xpos, memory_order_release);
-    atomic_store_explicit(&g_engine.mailbox.mouse_y, (float)ypos, memory_order_release);
+    atomic_store_explicit(&g_engine.mailbox.mouse_x[id], (float)xpos, memory_order_release);
+    atomic_store_explicit(&g_engine.mailbox.mouse_y[id], (float)ypos, memory_order_release);
 
     float dx = (float)(xpos - last_mx[id]);
     float dy = (float)(ypos - last_my[id]);
     last_mx[id] = xpos;
     last_my[id] = ypos;
 
-    float current_dx = atomic_load_explicit(&g_engine.mailbox.mouse_dx, memory_order_acquire);
-    while (!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.mouse_dx, &current_dx, current_dx + dx, memory_order_release, memory_order_relaxed));
+    float current_dx = atomic_load_explicit(&g_engine.mailbox.mouse_dx[id], memory_order_acquire);
+    while (!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.mouse_dx[id], &current_dx, current_dx + dx, memory_order_release, memory_order_relaxed));
 
-    float current_dy = atomic_load_explicit(&g_engine.mailbox.mouse_dy, memory_order_acquire);
-    while (!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.mouse_dy, &current_dy, current_dy + dy, memory_order_release, memory_order_relaxed));
+    float current_dy = atomic_load_explicit(&g_engine.mailbox.mouse_dy[id], memory_order_acquire);
+    while (!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.mouse_dy[id], &current_dy, current_dy + dy, memory_order_release, memory_order_relaxed));
 }
 
 void glfw_mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
@@ -157,35 +209,15 @@ void glfw_mouse_button_callback(GLFWwindow* window, int button, int action, int 
         if (action == GLFW_PRESS) {
             double cx, cy;
             glfwGetCursorPos(window, &cx, &cy);
-            atomic_store_explicit(&g_engine.mailbox.click_x, (float)cx, memory_order_release);
-            atomic_store_explicit(&g_engine.mailbox.click_y, (float)cy, memory_order_release);
-            atomic_store_explicit(&g_engine.mailbox.mouse_left, 1, memory_order_release);
+            atomic_store_explicit(&g_engine.mailbox.click_x[id], (float)cx, memory_order_release);
+            atomic_store_explicit(&g_engine.mailbox.click_y[id], (float)cy, memory_order_release);
+            atomic_store_explicit(&g_engine.mailbox.mouse_left[id], 1, memory_order_release);
         } else {
-            atomic_store_explicit(&g_engine.mailbox.mouse_left, 0, memory_order_release);
+            atomic_store_explicit(&g_engine.mailbox.mouse_left[id], 0, memory_order_release);
         }
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT) {
-        atomic_store_explicit(&g_engine.mailbox.mouse_right, (action == GLFW_PRESS) ? 1 : 0, memory_order_release);
+        atomic_store_explicit(&g_engine.mailbox.mouse_right[id], (action == GLFW_PRESS) ? 1 : 0, memory_order_release);
     }
-}
-
-EXPORT int vx_input_mouse_btn(int btn) {
-    if (btn == 0) return atomic_load_explicit(&g_engine.mailbox.mouse_left, memory_order_acquire);
-    if (btn == 1) return atomic_load_explicit(&g_engine.mailbox.mouse_right, memory_order_acquire);
-    return 0;
-}
-
-EXPORT float vx_input_mouse_x() { return atomic_load_explicit(&g_engine.mailbox.mouse_x, memory_order_acquire); }
-EXPORT float vx_input_mouse_y() { return atomic_load_explicit(&g_engine.mailbox.mouse_y, memory_order_acquire); }
-
-EXPORT float vx_input_click_x() {
-    return atomic_load_explicit(&g_engine.mailbox.click_x, memory_order_acquire);
-}
-EXPORT float vx_input_click_y() {
-    return atomic_load_explicit(&g_engine.mailbox.click_y, memory_order_acquire);
-}
-
-EXPORT int vx_input_is_captured() {
-    return atomic_load_explicit(&g_engine.mailbox.mouse_captured, memory_order_acquire);
 }
 
 void glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
@@ -198,21 +230,20 @@ void glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, in
         else if (key == GLFW_KEY_A) bit = 4; else if (key == GLFW_KEY_D) bit = 8;
         else if (key == GLFW_KEY_E) bit = 16; else if (key == GLFW_KEY_Q) bit = 32;
         if (bit) {
-            uint32_t mask = atomic_load_explicit(&g_engine.mailbox.wasd_mask, memory_order_acquire);
+            uint32_t mask = atomic_load_explicit(&g_engine.mailbox.wasd_mask[id], memory_order_acquire);
             uint32_t new_mask;
             do {
                 new_mask = (action == GLFW_PRESS) ? (mask | bit) : (mask & ~bit);
-            } while(!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.wasd_mask, &mask, new_mask, memory_order_release, memory_order_relaxed));
+            } while(!atomic_compare_exchange_weak_explicit(&g_engine.mailbox.wasd_mask[id], &mask, new_mask, memory_order_release, memory_order_relaxed));
         }
     }
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS) {
-        atomic_store_explicit(&g_engine.mailbox.last_key_pressed, GLFW_KEY_ESCAPE, memory_order_release);
+        atomic_store_explicit(&g_engine.mailbox.last_key_pressed[id], GLFW_KEY_ESCAPE, memory_order_release);
     }
     if (key == GLFW_KEY_SPACE) {
-        atomic_store_explicit(&g_engine.mailbox.key_space, (action != GLFW_RELEASE) ? 1 : 0, memory_order_release);
+        atomic_store_explicit(&g_engine.mailbox.key_space[id], (action != GLFW_RELEASE) ? 1 : 0, memory_order_release);
     }
 
-    // === MULTI-TENANT NATIVE FULLSCREEN TOGGLE ===
     if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
         if (!s_is_fullscreen[id]) {
             glfwGetWindowPos(window, &s_win_x[id], &s_win_y[id]);
@@ -232,9 +263,9 @@ void glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, in
     }
 
     if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
-        int is_cap = atomic_load_explicit(&g_engine.mailbox.mouse_captured, memory_order_acquire);
+        int is_cap = atomic_load_explicit(&g_engine.mailbox.mouse_captured[id], memory_order_acquire);
         is_cap = !is_cap;
-        atomic_store_explicit(&g_engine.mailbox.mouse_captured, is_cap, memory_order_release);
+        atomic_store_explicit(&g_engine.mailbox.mouse_captured[id], is_cap, memory_order_release);
 
         if (is_cap) {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_CAPTURED);
@@ -247,7 +278,7 @@ void glfw_key_callback(GLFWwindow* window, int key, int scancode, int action, in
 
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_1 || key == GLFW_KEY_2 || key == GLFW_KEY_3 || key == GLFW_KEY_4 || key == GLFW_KEY_F5 || key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
-            atomic_store_explicit(&g_engine.mailbox.last_key_pressed, key, memory_order_release);
+            atomic_store_explicit(&g_engine.mailbox.last_key_pressed[id], key, memory_order_release);
         }
     }
 }
@@ -304,10 +335,6 @@ EXPORT void vx_sys_eject_validation(void* instance) {
     }
 }
 
-EXPORT uint32_t vx_input_wasd() { return atomic_load_explicit(&g_engine.mailbox.wasd_mask, memory_order_acquire); }
-EXPORT float vx_input_mouse_dx() { return atomic_exchange_explicit(&g_engine.mailbox.mouse_dx, 0.0f, memory_order_acquire); }
-EXPORT float vx_input_mouse_dy() { return atomic_exchange_explicit(&g_engine.mailbox.mouse_dy, 0.0f, memory_order_acquire); }
-
 EXPORT int vx_sys_resize_flag(int window_id) {
     if (window_id < 0 || window_id >= MAX_WINDOWS) return 0;
     return atomic_exchange_explicit(&g_engine.mailbox.window_resized[window_id], 0, memory_order_acquire);
@@ -328,11 +355,6 @@ void glfw_framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     atomic_store_explicit(&g_engine.mailbox.win_h[id], height, memory_order_release);
     atomic_store_explicit(&g_engine.mailbox.window_resized[id], 1, memory_order_release);
 }
-
-EXPORT int vx_input_spacebar() {
-    return atomic_load_explicit(&g_engine.mailbox.key_space, memory_order_acquire);
-}
-
 
 #define RING_SIZE 4
 #define LOAD(var) atomic_load_explicit(&(var), memory_order_acquire)
@@ -811,6 +833,7 @@ void vx_init_mailbox() {
     atomic_init(&g_engine.mailbox.vk_instance, NULL);
 
     for (int i = 0; i < MAX_WINDOWS; i++) {
+        // --- Window State ---
         atomic_init(&g_engine.mailbox.glfw_cmd[i], CMD_IDLE);
         atomic_init(&g_engine.mailbox.glfw_arg_w[i], 0);
         atomic_init(&g_engine.mailbox.glfw_arg_h[i], 0);
@@ -818,20 +841,21 @@ void vx_init_mailbox() {
         atomic_init(&g_engine.mailbox.window_resized[i], 0);
         atomic_init(&g_engine.mailbox.win_w[i], 0);
         atomic_init(&g_engine.mailbox.win_h[i], 0);
-    }
 
-    atomic_init(&g_engine.mailbox.mouse_x, 0.0f);
-    atomic_init(&g_engine.mailbox.mouse_y, 0.0f);
-    atomic_init(&g_engine.mailbox.click_x, -1.0f);
-    atomic_init(&g_engine.mailbox.click_y, -1.0f);
-    atomic_init(&g_engine.mailbox.mouse_captured, 0);
-    atomic_init(&g_engine.mailbox.last_key_pressed, 0);
-    atomic_init(&g_engine.mailbox.wasd_mask, 0);
-    atomic_init(&g_engine.mailbox.mouse_dx, 0.0f);
-    atomic_init(&g_engine.mailbox.mouse_dy, 0.0f);
-    atomic_init(&g_engine.mailbox.mouse_left, 0);
-    atomic_init(&g_engine.mailbox.mouse_right, 0);
-    atomic_init(&g_engine.mailbox.key_space, 0);
+        // --- Input State ---
+        atomic_init(&g_engine.mailbox.mouse_x[i], 0.0f);
+        atomic_init(&g_engine.mailbox.mouse_y[i], 0.0f);
+        atomic_init(&g_engine.mailbox.click_x[i], -1.0f);
+        atomic_init(&g_engine.mailbox.click_y[i], -1.0f);
+        atomic_init(&g_engine.mailbox.mouse_captured[i], 0);
+        atomic_init(&g_engine.mailbox.last_key_pressed[i], 0);
+        atomic_init(&g_engine.mailbox.wasd_mask[i], 0);
+        atomic_init(&g_engine.mailbox.mouse_dx[i], 0.0f);
+        atomic_init(&g_engine.mailbox.mouse_dy[i], 0.0f);
+        atomic_init(&g_engine.mailbox.mouse_left[i], 0);
+        atomic_init(&g_engine.mailbox.mouse_right[i], 0);
+        atomic_init(&g_engine.mailbox.key_space[i], 0);
+    }
 }
 
 // --- THE CONSENSUS LUA OVERLORD THREAD ---
