@@ -5,8 +5,10 @@ local vmath = require("vmath")
 
 local Camera = {}
 
-function Camera.new()
+-- [UPDATED] Pass the window ID on creation
+function Camera.new(win_id)
     return {
+        win_id = win_id or 0, -- Store the ID safely inside the camera object
         ortho_zoom = 250.0,
         yaw = 0.785398,
         pitch = 0.615472,
@@ -21,7 +23,8 @@ function Camera.update(cam, frame_time, mouse_x, mouse_y, width, height)
     local EDGE_THRESHOLD = 40.0
     local pan_x, pan_z = 0.0, 0.0
 
-    if ffi.C.vx_input_is_captured() == 1 then
+    -- [UPDATED] Pass the stored win_id to the C-Core
+    if ffi.C.vx_input_is_captured(cam.win_id) == 1 then
         if mouse_x < EDGE_THRESHOLD then pan_x = -1.0
         elseif mouse_x > width - EDGE_THRESHOLD then pan_x = 1.0 end
 
@@ -38,7 +41,8 @@ function Camera.update(cam, frame_time, mouse_x, mouse_y, width, height)
     cam.pos.x = cam.pos.x + (right_x * pan_x + fwd_x * -pan_z) * frame_speed
     cam.pos.z = cam.pos.z + (right_z * pan_x + fwd_z * -pan_z) * frame_speed
 
-    local wasd = ffi.C.vx_input_wasd()
+    -- [UPDATED] Pass the stored win_id to the C-Core
+    local wasd = ffi.C.vx_input_wasd(cam.win_id)
     local zoom_dir = 0
     if bit.band(wasd, 16) ~= 0 then zoom_dir = -1 end
     if bit.band(wasd, 32) ~= 0 then zoom_dir = 1 end

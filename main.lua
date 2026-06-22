@@ -56,19 +56,19 @@ ffi.cdef[[
     typedef struct { long tv_sec; long tv_nsec; } timespec;
     int clock_gettime(int clk_id, timespec *tp);
 
-    int vx_input_last_key();
-    uint32_t vx_input_wasd();
-    float vx_input_mouse_dx();
-    float vx_input_mouse_dy();
-    float vx_input_mouse_x();
-    float vx_input_mouse_y();
-    float vx_input_click_x();
-    float vx_input_click_y();
-    int vx_input_is_captured();
+    int vx_input_last_key(int window_id);
+    uint32_t vx_input_wasd(int window_id);
+    float vx_input_mouse_dx(int window_id);
+    float vx_input_mouse_dy(int window_id);
+    float vx_input_mouse_x(int window_id);
+    float vx_input_mouse_y(int window_id);
+    float vx_input_click_x(int window_id);
+    float vx_input_click_y(int window_id);
+    int vx_input_is_captured(int window_id);
     int vx_sys_resize_flag(int window_id);
     void vx_sys_window_size(int window_id, int* w, int* h);
-    int vx_input_mouse_btn(int btn);
-    int vx_input_spacebar();
+    int vx_input_mouse_btn(int window_id, int btn);
+    int vx_input_spacebar(int window_id);
 
     int vx_stream_acquire();
     RenderPacket* vx_stream_packet(int idx);
@@ -488,6 +488,8 @@ local function main()
     local sync = engine_ctx.sync_state
     local memory = require("memory")
 
+    local win_id = cfg_gfx.win.id
+
     print("[LUA CO] Initializing VRAM Index Buffer with Strict Topology...")
     local index_ptr = ffi.cast("uint32_t*", memory.Mapped["MASTER_INDEX_BLOCK"])
 
@@ -520,7 +522,7 @@ local function main()
     pc.dt = 0.0
 
     local camera_mod = require("camera")
-    local cam = camera_mod.new()
+    local cam = camera_mod.new(win_id)
     local inv_vp = ffi.new("mat4_t")
 
     local total_time = 0.0
@@ -575,7 +577,7 @@ local function main()
 
     while ffi.C.vx_core_is_running() == 1 do
 
-        if ffi.C.vx_sys_resize_flag() == 1 then
+        if ffi.C.vx_sys_resize_flag(win_id) == 1 then
             is_resizing = true
             last_resize_time = get_time_hires()
         end
@@ -584,13 +586,13 @@ local function main()
         local frame_time = math.max(0.001, math.min(current_time - last_time, 0.25))
         last_time = current_time
 
-        local mouse_left = ffi.C.vx_input_mouse_btn(0)
-        local mouse_x = ffi.C.vx_input_mouse_x()
-        local mouse_y = ffi.C.vx_input_mouse_y()
+        local mouse_left = ffi.C.vx_input_mouse_btn(win_id, 0)
+        local mouse_x = ffi.C.vx_input_mouse_x(win_id)
+        local mouse_y = ffi.C.vx_input_mouse_y(win_id)
 
         if mouse_left == 1 and prev_mouse_left == 0 then
-            local click_x = ffi.C.vx_input_click_x()
-            local click_y = ffi.C.vx_input_click_y()
+            local click_x = ffi.C.vx_input_click_x(win_id)
+            local click_y = ffi.C.vx_input_click_y(win_id)
 
             local clicked_idx = matrix_raycast_terrain(
                click_x, click_y, sc.extent.width, sc.extent.height,
@@ -640,7 +642,7 @@ local function main()
             end
         end
 
-        local last_key = ffi.C.vx_input_last_key()
+        local last_key = ffi.C.vx_input_last_key(win_id)
         if last_key == cfg_gfx.key.esc then ffi.C.vx_core_shutdown()
         elseif last_key == cfg_gfx.key.f5 then wants_hotswap = true
         elseif last_key == cfg_gfx.key.num1 then active_render_mode = cfg_gfx.mode.dual
@@ -651,7 +653,7 @@ local function main()
         if is_resizing then
             if (get_time_hires() - last_resize_time) > RESIZE_COOLDOWN then
                 local new_w, new_h = ffi.new("int[1]"), ffi.new("int[1]")
-                ffi.C.vx_sys_window_size(new_w, new_h)
+                ffi.C.vx_sys_window_size(win_id, new_w, new_h)
 
                 if new_w[0] > 0 and new_h[0] > 0 then
                     print("\n[LUA CO] Window Stable. Initiating Mini-Weaver Rebuild...")
