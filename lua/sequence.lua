@@ -20,7 +20,7 @@ function SequenceModule.init(app_ctx)
                 ctx.vk_runtime = vulkan.create_instance(reg.vk_reqs.instance_ext, cfg_gfx.cfg)
 
                 -- Note: FFI CDEF should be globally defined, but if you do it locally here:
-                -- ffi.cdef("void vx_sys_publish_instance(int window_id, void* instance);")
+                ffi.cdef("void vx_sys_publish_instance(int window_id, void* instance);")
 
                 -- [NEW] Pass the dynamic window ID
                 ffi.C.vx_sys_publish_instance(cfg_gfx.win.id, ctx.vk_runtime.instance)
