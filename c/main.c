@@ -375,18 +375,38 @@ typedef struct {
 // INSTANTIATE WITH MASK
 static RenderRing g_ring = { .ready_idx = -1, .locked_mask = 0 };
 
+// NEW: Global Spinlock for thread-safe vkQueueSubmit
+static atomic_flag g_queue_lock = ATOMIC_FLAG_INIT;
+
 static RenderThreadInit g_wsi;
 static WindowWSI g_window_wsi[MAX_WINDOWS] = {0}; // The Swapchain Registry
+static VkCommandBuffer g_cmd_buffers[MAX_WINDOWS][3]; // C-side Command Buffer Registry
+
 static vmath_thread_t g_render_thread;
 static atomic_int g_render_thread_active = 0;
+
+// [NEW] Global Command Pool Tracking
+static VkCommandPool g_render_cmd_pool = VK_NULL_HANDLE;
+static VkCommandPool g_transfer_cmd_pool = VK_NULL_HANDLE;
 
 EXPORT void vx_stream_register_window(int window_id, WindowWSI* wsi) {
     if (window_id < 0 || window_id >= MAX_WINDOWS || wsi == NULL) return;
     g_window_wsi[window_id] = *wsi;
 
+    // ALLOCATE COMMAND BUFFERS EXCLUSIVELY FOR THIS WINDOW
+    if (g_render_cmd_pool != VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo alloc_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = g_render_cmd_pool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 3 // Frames in flight
+        };
+        vkAllocateCommandBuffers(g_wsi.device, &alloc_info, g_cmd_buffers[window_id]);
+    }
+
     // Memory barrier ensures the Async Render Thread immediately sees the new WSI struct
     atomic_thread_fence(memory_order_release);
-    printf("[C-CORE] Swapchain & WSI Registered for Window %d\n", window_id);
+    printf("[C-CORE] Swapchain, WSI, & Command Buffers Registered for Window %d\n", window_id);
 }
 
 // [NEW] Global Command Pool Tracking
@@ -492,7 +512,16 @@ THREAD_FUNC transfer_thread_loop(void* arg) {
 
                 // Submit directly to the dedicated Transfer Queue!
                 printf("[C-CORE] Submitting DMA Transfer. Timeline Signal Value: %llu\n", (unsigned long long)job->signal_val);
+
+                // SPINLOCK ACQUIRE
+                while (atomic_flag_test_and_set_explicit(&g_queue_lock, memory_order_acquire)) {
+                    SLEEP_MS(1);
+                }
+
                 pfnSubmit(g_wsi.transfer_queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+                // SPINLOCK RELEASE
+                atomic_flag_clear_explicit(&g_queue_lock, memory_order_release);
 
                 // Free the mailbox slot immediately.
                 // Lua checks the Semaphore value, not this mailbox, to know when it's done!
@@ -696,15 +725,6 @@ THREAD_FUNC render_thread_loop(void* arg) {
     // Replace the local pool declaration
     vkCreateCommandPool(g_wsi.device, &pool_info, NULL, &g_render_cmd_pool);
 
-    VkCommandBuffer cmd_buffers[3];
-    VkCommandBufferAllocateInfo alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = g_render_cmd_pool, // Use the global
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 3
-    };
-    vkAllocateCommandBuffers(g_wsi.device, &alloc_info, cmd_buffers);
-
     uint32_t current_frame = 0;
     int local_read = -1;
     int active_ring_slots[3] = {-1, -1, -1}; // NEW: Tracks VRAM in flight
@@ -743,6 +763,12 @@ THREAD_FUNC render_thread_loop(void* arg) {
         int wid = p->window_id;
         WindowWSI* win_wsi = &g_window_wsi[wid]; // Point to the target window WSI
 
+        // NULL CHECK GUARD: If Lua hot-plugged but the fence hasn't synced, skip this frame.
+        if (win_wsi->in_flight[current_frame] == VK_NULL_HANDLE) {
+            SLEEP_MS(1);
+            continue;
+        }
+
         // 2. Safe to sleep on the specific window's GPU WSI
         pfnWait(g_wsi.device, 1, &win_wsi->in_flight[current_frame], VK_TRUE, UINT64_MAX);
 
@@ -753,7 +779,9 @@ THREAD_FUNC render_thread_loop(void* arg) {
         }
 
         active_ring_slots[current_frame] = local_read;
-        VkCommandBuffer cmd = cmd_buffers[current_frame];
+
+        // PULL FROM THE C-SIDE PER-WINDOW ARRAY
+        VkCommandBuffer cmd = g_cmd_buffers[wid][current_frame];
 
         // 1. Wait on CPU ring buffer fence for THIS command buffer slot
         pfnWait(g_wsi.device, 1, &win_wsi->in_flight[current_frame], VK_TRUE, UINT64_MAX);
@@ -791,7 +819,16 @@ THREAD_FUNC render_thread_loop(void* arg) {
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &win_wsi->render_finished[img_idx] // <-- TIED TO HARDWARE IMAGE
         };
+
+        // SPINLOCK ACQUIRE
+        while (atomic_flag_test_and_set_explicit(&g_queue_lock, memory_order_acquire)) {
+            SLEEP_MS(1);
+        }
+
         pfnSubmit(g_wsi.queue, 1, &submitInfo, win_wsi->in_flight[current_frame]);
+
+        // SPINLOCK RELEASE
+        atomic_flag_clear_explicit(&g_queue_lock, memory_order_release);
 
         // 5. Present (Wait on the GPU IMAGE semaphore)
         VkPresentInfoKHR presentInfo = {
