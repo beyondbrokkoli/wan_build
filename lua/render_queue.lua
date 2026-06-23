@@ -48,7 +48,7 @@ function RenderQueue.init(app_ctx)
     end
 
     return {
-        PackFrame = function(write_idx, pc, rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, total_tiles, net_identity)
+        PackFrame = function(write_idx, pc, rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, total_tiles, net_identity, window_id)
             local FRAME_BYTES = total_tiles * ffi.sizeof("RtsTileInstance")
             local current_frame_offset = write_idx * FRAME_BYTES
             pc.aos_current_idx = current_frame_offset / 4
@@ -105,7 +105,7 @@ function RenderQueue.init(app_ctx)
         end,
 
         -- THE EDITOR DOMAIN PACKER
-        PackEditorFrame = function(write_idx, pc, rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, total_tiles)
+        PackEditorFrame = function(write_idx, pc, rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, total_tiles, window_id)
             local FRAME_BYTES = total_tiles * ffi.sizeof("RtsTileInstance")
             local current_frame_offset = write_idx * FRAME_BYTES
             pc.aos_current_idx = current_frame_offset / 4
