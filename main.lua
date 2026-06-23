@@ -707,6 +707,9 @@ local function main()
             seq.boot[8].action(editor_ctx) -- Graphics Pipelines
             seq.boot[9].action(editor_ctx) -- Sync Structures
 
+            -- [THE FIX] Register the Swapchain with the Async Overlord!
+            seq.boot[10].action(editor_ctx)
+
             print("[LUA CO] Editor Domain LIVE.\n")
         end
 
