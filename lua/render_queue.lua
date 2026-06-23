@@ -76,6 +76,8 @@ function RenderQueue.init(app_ctx)
             end
 
             local packet = ffi.C.vx_stream_packet(write_idx)
+            packet.window_id = window_id -- Assign the shipping label
+
             local MAX_DRAW_COMMANDS = 1024
             local current_queue_ptr = render_queues + (write_idx * MAX_DRAW_COMMANDS)
 
@@ -97,6 +99,44 @@ function RenderQueue.init(app_ctx)
             elseif active_render_mode == MODE_POINTS then
                 draw_count = pack_pass(current_queue_ptr, 0, "points", gfx, desc, total_tiles, pc, sc)
             end
+
+            packet.draw_queue = current_queue_ptr
+            packet.draw_count = draw_count
+        end,
+
+        -- THE EDITOR DOMAIN PACKER
+        PackEditorFrame = function(write_idx, pc, rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, total_tiles)
+            local FRAME_BYTES = total_tiles * ffi.sizeof("RtsTileInstance")
+            local current_frame_offset = write_idx * FRAME_BYTES
+            pc.aos_current_idx = current_frame_offset / 4
+
+            local gpu_ptr = ffi.cast("RtsTileInstance*", master_ptr + (current_frame_offset / 4))
+
+            -- EDITOR LOGIC: No 8-player folding.
+            -- Just draw Layer 0 (The World/Template Layer) directly for raw inspection.
+            for i = 0, total_tiles - 1 do
+                gpu_ptr[i].px = vram_template[i].px
+                gpu_ptr[i].pz = vram_template[i].pz
+                gpu_ptr[i].py = Fixed.to_float(rts_grid.elevation[0][i])
+                gpu_ptr[i].tile_data = bit.lshift(rts_grid.terrain[0][i], 24)
+            end
+
+            local packet = ffi.C.vx_stream_packet(write_idx)
+            packet.window_id = window_id -- Assign the shipping label
+
+            local MAX_DRAW_COMMANDS = 1024
+            local current_queue_ptr = render_queues + (write_idx * MAX_DRAW_COMMANDS)
+
+            -- Bind the Editor's specific Swapchain/Depth Image targets
+            packet.gfx_layout = ffi.cast("uint64_t", gfx.pipelineLayout)
+            packet.vertex_buffer = ffi.cast("uint64_t", memory.Buffers["MASTER_GPU_BLOCK"])
+            packet.index_buffer = ffi.cast("uint64_t", memory.Buffers["MASTER_INDEX_BLOCK"])
+            packet.depth_image = ffi.cast("uint64_t", gfx.depthImage)
+            packet.depth_view = ffi.cast("uint64_t", gfx.depthImageView)
+            packet.width = sc.extent.width
+            packet.height = sc.extent.height
+
+            local draw_count = pack_pass(current_queue_ptr, 0, "geom", gfx, desc, total_tiles, pc, sc)
 
             packet.draw_queue = current_queue_ptr
             packet.draw_count = draw_count

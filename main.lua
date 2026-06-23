@@ -75,6 +75,13 @@ ffi.cdef[[
     void vx_stream_commit(int idx);
     void vx_thread_kill();
 
+    // -- [NEW] MULTI-SWAPCHAIN HOT-PLUG INTERFACE
+    void vx_stream_init(RenderThreadInit* wsi);
+    void vx_stream_register_window(int window_id, WindowWSI* wsi);
+    void vx_thread_start();
+    void vx_transfer_setup(uint32_t q_family_index);
+    int vx_transfer_request(uint64_t src, uint64_t dst, uint64_t size, uint64_t t_sem, uint64_t sig_val);
+
     typedef struct __attribute__((aligned(16))) { float x, y, z, w; } vec4_t;
 ]]
 
@@ -763,6 +770,7 @@ local function main()
             total_time = total_time + frame_time
             pc.total_time = total_time
 
+            -- 1. PACK WINDOW 0 (GAME)
             camera_mod.update(cam, frame_time, mouse_x, mouse_y, sc.extent.width, sc.extent.height)
             camera_mod.get_matrices(cam, sc.extent.width, sc.extent.height, pc.viewProj, inv_vp)
 
@@ -771,7 +779,7 @@ local function main()
                 local alpha = ctx.accumulator / FIXED_DT
                 pc.dt = alpha
 
-                render_queue.PackFrame(write_idx, pc, ctx.rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, ctx.total_tiles, ctx.net_identity)
+                render_queue.PackFrame(write_idx, pc, ctx.rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, gfx, desc, sc, ctx.total_tiles, ctx.net_identity, cfg_gfx.win.id)
 
                 if wants_hotswap then
                     print("\n[LUA] Initiating Lock-Free Shader Hotswap...")
@@ -783,6 +791,18 @@ local function main()
                 ffi.C.vx_stream_commit(write_idx)
                 pump_deletion_queue(vk_rt.vk, vk_rt, frame_count)
                 frame_count = frame_count + 1
+            end
+
+            -- 2. PACK WINDOW 1 (EDITOR)
+            if editor_ctx then
+                local editor_idx = ffi.C.vx_stream_acquire()
+                if editor_idx ~= -1 then
+                    -- Note: You'll eventually want a separate camera for the Editor!
+                    -- For now, we just pass the Game's pc and matrices so you see *something*.
+                    render_queue.PackEditorFrame(editor_idx, pc, ctx.rts_grid, vram_template, render_queues, active_render_mode, master_ptr, memory, editor_ctx.gfx_state, editor_ctx.desc_state, editor_ctx.sc_state, ctx.total_tiles, editor_ctx.cfg_gfx.win.id)
+
+                    ffi.C.vx_stream_commit(editor_idx)
+                end
             end
         end
         sys_sleep(1)

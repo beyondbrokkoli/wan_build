@@ -125,52 +125,60 @@ function SequenceModule.init(app_ctx)
         { -- 10
             name = "Async Overlord Handoff",
             action = function(ctx)
-                print("[WEAVER] Packing C-Core Mailbox and firing Render Thread...")
+                print(string.format("[WEAVER] Packing C-Core Mailbox for Window %d...", cfg_gfx.win.id))
                 local vk, dev = ctx.vk_runtime.vk, ctx.vk_runtime.device
                 local sc, sync = ctx.sc_state, ctx.sync_state
 
-                local wsi = ffi.new("RenderThreadInit")
-                wsi.device = dev
-                wsi.queue = ctx.vk_runtime.queue
-                wsi.transfer_queue = ctx.vk_runtime.transferQueue
-                wsi.swapchain = sc.handle
+                -- 1. Pack the Global Init Struct (Only needed for Window 0)
+                if cfg_gfx.win.id == 0 then
+                    local wsi = ffi.new("RenderThreadInit")
+                    wsi.device = dev
+                    wsi.queue = ctx.vk_runtime.queue
+                    wsi.transfer_queue = ctx.vk_runtime.transferQueue
+
+                    wsi.vkWaitForFences         = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkWaitForFences"))
+                    wsi.vkAcquireNextImageKHR   = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkAcquireNextImageKHR"))
+                    wsi.vkResetFences           = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkResetFences"))
+                    wsi.vkQueueSubmit           = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkQueueSubmit"))
+                    wsi.vkQueuePresentKHR       = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkQueuePresentKHR"))
+                    wsi.pfnBegin                = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkCmdBeginRenderingKHR"))
+                    wsi.pfnEnd                  = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkCmdEndRenderingKHR"))
+                    wsi.pfnSetCullMode          = vk.vkGetDeviceProcAddr(dev, "vkCmdSetCullModeEXT")
+                    wsi.pfnSetFrontFace         = vk.vkGetDeviceProcAddr(dev, "vkCmdSetFrontFaceEXT")
+                    wsi.pfnSetPrimitiveTopology = vk.vkGetDeviceProcAddr(dev, "vkCmdSetPrimitiveTopologyEXT")
+                    wsi.pfnSetDepthTestEnable   = vk.vkGetDeviceProcAddr(dev, "vkCmdSetDepthTestEnableEXT")
+                    wsi.pfnSetDepthWriteEnable  = vk.vkGetDeviceProcAddr(dev, "vkCmdSetDepthWriteEnableEXT")
+                    wsi.pfnSetDepthCompareOp    = vk.vkGetDeviceProcAddr(dev, "vkCmdSetDepthCompareOpEXT")
+
+                    ffi.C.vx_stream_init(wsi)
+                end
+
+                -- 2. Pack the Window-Specific WSI
+                local win_wsi = ffi.new("WindowWSI")
+                win_wsi.swapchain = sc.handle
 
                 for i = 0, sc.imageCount - 1 do
-                    wsi.swapchain_images[i] = ffi.cast("uint64_t", sc.images[i])
-                    wsi.swapchain_views[i]  = ffi.cast("uint64_t", sc.imageViews[i])
+                    win_wsi.swapchain_images[i] = ffi.cast("uint64_t", sc.images[i])
+                    win_wsi.swapchain_views[i]  = ffi.cast("uint64_t", sc.imageViews[i])
                 end
 
                 for i = 0, cfg_gfx.cfg.frame_slots - 1 do
-                    wsi.image_available[i] = sync.imageAvailable[i]
-                    wsi.render_finished[i] = sync.renderFinished[i]
-                    wsi.in_flight[i]       = sync.inFlight[i]
+                    win_wsi.image_available[i] = sync.imageAvailable[i]
+                    win_wsi.render_finished[i] = sync.renderFinished[i]
+                    win_wsi.in_flight[i]       = sync.inFlight[i]
                 end
 
-                wsi.vkWaitForFences         = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkWaitForFences"))
-                wsi.vkAcquireNextImageKHR = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkAcquireNextImageKHR"))
-                wsi.vkResetFences           = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkResetFences"))
-                wsi.vkQueueSubmit           = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkQueueSubmit"))
-                wsi.vkQueuePresentKHR       = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkQueuePresentKHR"))
-                wsi.pfnBegin                = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkCmdBeginRenderingKHR"))
-                wsi.pfnEnd                  = ffi.cast("void*", vk.vkGetDeviceProcAddr(dev, "vkCmdEndRenderingKHR"))
-                wsi.pfnSetCullMode          = vk.vkGetDeviceProcAddr(dev, "vkCmdSetCullModeEXT")
-                wsi.pfnSetFrontFace         = vk.vkGetDeviceProcAddr(dev, "vkCmdSetFrontFaceEXT")
-                wsi.pfnSetPrimitiveTopology = vk.vkGetDeviceProcAddr(dev, "vkCmdSetPrimitiveTopologyEXT")
-                wsi.pfnSetDepthTestEnable   = vk.vkGetDeviceProcAddr(dev, "vkCmdSetDepthTestEnableEXT")
-                wsi.pfnSetDepthWriteEnable  = vk.vkGetDeviceProcAddr(dev, "vkCmdSetDepthWriteEnableEXT")
-                wsi.pfnSetDepthCompareOp    = vk.vkGetDeviceProcAddr(dev, "vkCmdSetDepthCompareOpEXT")
+                -- 3. Register the Swapchain dynamically!
+                ffi.C.vx_stream_register_window(cfg_gfx.win.id, win_wsi)
 
-                ffi.cdef[[
-                    void vx_stream_init(RenderThreadInit* wsi);
-                    void vx_thread_start();
-                    void vx_transfer_setup(uint32_t q_family_index);
-                    int vx_transfer_request(uint64_t src, uint64_t dst, uint64_t size, uint64_t t_sem, uint64_t sig_val);
-                ]]
-
-                ffi.C.vx_transfer_setup(ctx.vk_runtime.tIndex)
-                ffi.C.vx_stream_init(wsi)
-                ffi.C.vx_thread_start()
-                print("[WEAVER] Engine Initialization Complete. Async Overlord is LIVE.")
+                -- 4. Only start the threads once
+                if cfg_gfx.win.id == 0 then
+                    ffi.C.vx_transfer_setup(ctx.vk_runtime.tIndex)
+                    ffi.C.vx_thread_start()
+                    print("[WEAVER] Engine Initialization Complete. Async Overlords are LIVE.")
+                else
+                    print(string.format("[WEAVER] Swapchain %d hot-plugged to active Async Thread.", cfg_gfx.win.id))
+                end
             end
         }
     }
