@@ -679,11 +679,12 @@ local function main()
             end
             print("[LUA CO] Editor Surface Acquired!")
 
-            -- 4. Build the Editor Context (Sharing the Game's Vulkan Runtime)
+            -- 4. Build the Editor Context (Sharing the Game's Vulkan Runtime & Descriptors)
             editor_ctx = {
                 cfg_gfx = editor_cfg,
                 vk_runtime = vk_rt, -- Share the core GPU connection!
-                old_swapchain = ffi.cast("VkSwapchainKHR", 0) -- No old swapchain for a fresh window
+                desc_state = desc,  -- [THE MISSING PIECE] Share the Master GPU bindings!
+                old_swapchain = ffi.cast("VkSwapchainKHR", 0)
             }
 
             -- 5. Run the Mini-Weaver sequence to build the Swapchain and Pipelines
