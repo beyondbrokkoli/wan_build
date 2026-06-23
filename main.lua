@@ -78,6 +78,13 @@ ffi.cdef[[
     typedef struct __attribute__((aligned(16))) { float x, y, z, w; } vec4_t;
 ]]
 
+local function deep_copy(obj)
+    if type(obj) ~= "table" then return obj end
+    local res = {}
+    for k, v in pairs(obj) do res[deep_copy(k)] = deep_copy(v) end
+    return res
+end
+
 -- --- UTILITY & TIMING ---
 local function sys_sleep(ms)
     if jit.os == "Windows" then ffi.C.Sleep(ms) else ffi.C.usleep(ms * 1000) end
