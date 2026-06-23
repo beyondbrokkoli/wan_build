@@ -662,18 +662,20 @@ local function main()
             print("\n[LUA CO] F2 Detected! Spawning Editor Domain (Window ID 1)...")
 
             -- 1. Create a distinct config for the Editor
-            local editor_cfg = deepcopy(cfg_gfx) -- Assuming you have a deepcopy helper
+            local editor_cfg = deepcopy(cfg_gfx)
             editor_cfg.win.id = 1
             editor_cfg.win.w = 1024
             editor_cfg.win.h = 768
 
             -- 2. Command C-Core to boot the OS Window
+            -- [THE MISSING LINK]: Hand the shared Vulkan instance to Window 1's mailbox!
+            ffi.C.vx_sys_publish_instance(editor_cfg.win.id, vk_rt.instance)
             ffi.C.vx_sys_set_cmd(editor_cfg.win.id, editor_cfg.sys.boot, editor_cfg.win.w, editor_cfg.win.h)
 
             -- 3. Yield gracefully until the C-Core provisions the surface
             print("[LUA CO] Awaiting Editor Surface...")
             while ffi.C.vx_sys_get_surface(editor_cfg.win.id) == nil do
-                sys_sleep(10) -- Short sleep, we are technically blocking the Game loop for a few ms here!
+                sys_sleep(10)
             end
             print("[LUA CO] Editor Surface Acquired!")
 
