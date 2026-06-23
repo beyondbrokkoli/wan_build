@@ -1,32 +1,4 @@
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkQueueSubmit(): THREADING ERROR : object of type VkQueue is simultaneously used in current thread 2704 and thread 13616
-
-[LUA CO] Async Transfer Complete! Palette Haven Online.
-
-[HEARTBEAT] Sim Tick: 61 | Confirmed: 59 | Accum: 0.0013
-  -> [DIAGNOSTIC] Peer 1 | Highest Tick: 65 | AckOfMe: 58
-
-[...]
-[...] BOOTING THE EDITOR WINDOW
-[...]
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkResetCommandBuffer(): (VkCommandBuffer 0x1e7793bf038) is in use.
-The Vulkan spec states: commandBuffer must not be in the pending state (https://docs.vulkan.org/spec/latest/chapters/cmdbuffers.html#VUID-vkResetCommandBuffer-commandBuffer-00045)
-
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkWaitForFences(): pFences[0] is VK_NULL_HANDLE.
-
-
-[VULKAN LAYER ENFORCER]
-SEVERITY: 4096
-MESSAGE: vkWaitForFences(): pFences[0] Invalid VkFence Object 0x0.
-The Vulkan spec states: pFences must be a valid pointer to an array of fenceCount valid VkFence handles (https://docs.vulkan.org/spec/latest/chapters/synchronization.html#VUID-vkWaitForFences-pFences-parameter)
-
-
-[VUSegmentation fault         bin/boot.exe
+[NET] Scene loaded. Camera unlocked. Awaiting Timeline Synchronization...
+[Vulkan Loader] ERROR:          vkResetCommandBuffer: Invalid commandBuffer [VUID-vkResetCommandBuffer-commandBuffer-parameter]
+[C-
+AzureAD+HalimOmarZaghdoudi@DESKTOP-BD3FFTI MINGW64 ~/wan_build
