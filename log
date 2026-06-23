@@ -1,11 +1,14 @@
-[LUA CO] F2 Detected! Spawning Editor Domain (Window ID 1)...
-[LUA CO] Awaiting Editor Surface...
-[C-CORE] Window 1 & Surface Bound Successfully!
-[LUA CO] Editor Surface Acquired!
-[LUA CO] Building Editor Swapchain & Pipelines...
-[SWAPCHAIN] Building the display chain...
-[SWAPCHAIN] Created successfully with 3 images!
-[GRAPHICS] Building Reverse-Z Depth Buffer and Shader Modules...
-[RENDERER] Forging Synchronization Primitives...
-[LUA CO] Editor Domain LIVE.
-MESSAGE: vkDestroyDevice(): Object Tracking - For VkDevice 0x1d8c99a0088, VkImage 0x410000000041 has not been destroyed.
+
+
+[VULKAN LAYER ENFORCER]
+SEVERITY: 4096
+MESSAGE: vkWaitForFences(): pFences[0] is VK_NULL_HANDLE.
+
+
+[VULKAN LAYER ENFORCER]
+SEVERITY: 4096
+MESSAGE: vkWaitForFences(): pFences[0] Invalid VkFence Object 0x0.
+The Vulkan spec states: pFences must be a valid pointer to an array of fenceCount valid VkFence handles (https://docs.vulkan.org/spec/latest/chapters/synchronization.html#VUID-vkWaitForFences-pFences-parameter)
+
+Segmentation fault         bin/boot.exe
+
