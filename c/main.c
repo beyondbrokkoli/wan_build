@@ -393,20 +393,9 @@ EXPORT void vx_stream_register_window(int window_id, WindowWSI* wsi) {
     if (window_id < 0 || window_id >= MAX_WINDOWS || wsi == NULL) return;
     g_window_wsi[window_id] = *wsi;
 
-    // ALLOCATE COMMAND BUFFERS EXCLUSIVELY FOR THIS WINDOW
-    if (g_render_cmd_pool != VK_NULL_HANDLE) {
-        VkCommandBufferAllocateInfo alloc_info = {
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            .commandPool = g_render_cmd_pool,
-            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 3 // Frames in flight
-        };
-        vkAllocateCommandBuffers(g_wsi.device, &alloc_info, g_cmd_buffers[window_id]);
-    }
-
     // Memory barrier ensures the Async Render Thread immediately sees the new WSI struct
     atomic_thread_fence(memory_order_release);
-    printf("[C-CORE] Swapchain, WSI, & Command Buffers Registered for Window %d\n", window_id);
+    printf("[C-CORE] Swapchain & WSI Registered for Window %d\n", window_id);
 }
 
 // DIRECTIVE ZETA: ASYNC TRANSFER OVERLORD
@@ -763,6 +752,19 @@ THREAD_FUNC render_thread_loop(void* arg) {
         if (win_wsi->in_flight[current_frame] == VK_NULL_HANDLE) {
             SLEEP_MS(1);
             continue;
+        }
+
+        // --- LAZY COMMAND BUFFER ALLOCATION ---
+        // The thread safely allocates its own memory the first time it encounters a new window
+        if (g_cmd_buffers[wid][0] == VK_NULL_HANDLE) {
+            VkCommandBufferAllocateInfo alloc_info = {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .commandPool = g_render_cmd_pool,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 3
+            };
+            vkAllocateCommandBuffers(g_wsi.device, &alloc_info, g_cmd_buffers[wid]);
+            printf("[C-CORE] Async Render Thread dynamically allocated Command Buffers for Window %d\n", wid);
         }
 
         // 2. Safe to sleep on the specific window's GPU WSI
