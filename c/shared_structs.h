@@ -66,9 +66,11 @@ typedef struct __attribute__((packed)) {
 } DrawCommand;
 
 typedef struct __attribute__((packed, aligned(64))) {
+    int32_t window_id;
+    uint8_t _pad_auto_0[4];
     DrawCommand* draw_queue;
     uint32_t draw_count;
-    uint8_t _pad_auto_0[4];
+    uint8_t _pad_auto_1[4];
     uint64_t gfx_layout;
     uint64_t vertex_buffer;
     uint64_t index_buffer;
@@ -78,7 +80,7 @@ typedef struct __attribute__((packed, aligned(64))) {
     uint64_t depth_view;
     uint32_t width;
     uint32_t height;
-    uint8_t _pad_tail[48];
+    uint8_t _pad_tail[40];
 } RenderPacket;
 
 #pragma pack(push, 1)
@@ -134,14 +136,31 @@ typedef struct __attribute__((packed)) {
 
 #ifdef VX_ENABLE_VULKAN_STRUCTS
         typedef struct {
-            VkDevice device; VkQueue queue; VkQueue transfer_queue; VkSwapchainKHR swapchain;
-            uint64_t swapchain_images[10]; uint64_t swapchain_views[10];
-            VkSemaphore image_available[10]; VkSemaphore render_finished[10];
-            VkFence in_flight[10]; void* vkWaitForFences; void* vkAcquireNextImageKHR;
-            void* vkResetFences; void* vkQueueSubmit; void* vkQueuePresentKHR;
-            void* pfnBegin; void* pfnEnd; void* pfnSetCullMode; void* pfnSetFrontFace;
-            void* pfnSetPrimitiveTopology; void* pfnSetDepthTestEnable;
-            void* pfnSetDepthWriteEnable; void* pfnSetDepthCompareOp;
+            VkSwapchainKHR swapchain;
+            uint64_t swapchain_images[10];
+            uint64_t swapchain_views[10];
+            VkSemaphore image_available[10];
+            VkSemaphore render_finished[10];
+            VkFence in_flight[10];
+        } WindowWSI;
+
+        typedef struct {
+            VkDevice device;
+            VkQueue queue;
+            VkQueue transfer_queue;
+            void* vkWaitForFences;
+            void* vkAcquireNextImageKHR;
+            void* vkResetFences;
+            void* vkQueueSubmit;
+            void* vkQueuePresentKHR;
+            void* pfnBegin;
+            void* pfnEnd;
+            void* pfnSetCullMode;
+            void* pfnSetFrontFace;
+            void* pfnSetPrimitiveTopology;
+            void* pfnSetDepthTestEnable;
+            void* pfnSetDepthWriteEnable;
+            void* pfnSetDepthCompareOp;
         } RenderThreadInit;
     
 #endif // VX_ENABLE_VULKAN_STRUCTS
