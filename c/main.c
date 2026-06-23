@@ -409,10 +409,6 @@ EXPORT void vx_stream_register_window(int window_id, WindowWSI* wsi) {
     printf("[C-CORE] Swapchain, WSI, & Command Buffers Registered for Window %d\n", window_id);
 }
 
-// [NEW] Global Command Pool Tracking
-static VkCommandPool g_render_cmd_pool = VK_NULL_HANDLE;
-static VkCommandPool g_transfer_cmd_pool = VK_NULL_HANDLE;
-
 // DIRECTIVE ZETA: ASYNC TRANSFER OVERLORD
 typedef struct {
     uint64_t src_buffer;
