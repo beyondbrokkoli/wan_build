@@ -374,9 +374,20 @@ typedef struct {
 
 // INSTANTIATE WITH MASK
 static RenderRing g_ring = { .ready_idx = -1, .locked_mask = 0 };
+
 static RenderThreadInit g_wsi;
+static WindowWSI g_window_wsi[MAX_WINDOWS] = {0}; // The Swapchain Registry
 static vmath_thread_t g_render_thread;
 static atomic_int g_render_thread_active = 0;
+
+EXPORT void vx_stream_register_window(int window_id, WindowWSI* wsi) {
+    if (window_id < 0 || window_id >= MAX_WINDOWS || wsi == NULL) return;
+    g_window_wsi[window_id] = *wsi;
+
+    // Memory barrier ensures the Async Render Thread immediately sees the new WSI struct
+    atomic_thread_fence(memory_order_release);
+    printf("[C-CORE] Swapchain & WSI Registered for Window %d\n", window_id);
+}
 
 // [NEW] Global Command Pool Tracking
 static VkCommandPool g_render_cmd_pool = VK_NULL_HANDLE;
@@ -727,8 +738,13 @@ THREAD_FUNC render_thread_loop(void* arg) {
         // and overwrite it while we sleep on the Vulkan Fence!
         atomic_fetch_or_explicit(&g_ring.locked_mask, (1 << local_read), memory_order_release);
 
-        // 2. Safe to sleep on the GPU WSI
-        pfnWait(g_wsi.device, 1, &g_wsi.in_flight[current_frame], VK_TRUE, UINT64_MAX);
+        // 4. Safely read the sealed packet headers BEFORE sleeping
+        RenderPacket* p = &g_ring.packets[local_read];
+        int wid = p->window_id;
+        WindowWSI* win_wsi = &g_window_wsi[wid]; // Point to the target window WSI
+
+        // 2. Safe to sleep on the specific window's GPU WSI
+        pfnWait(g_wsi.device, 1, &win_wsi->in_flight[current_frame], VK_TRUE, UINT64_MAX);
 
         // 3. UNLOCK: The GPU has finished drawing the oldest frame. Give the slot back to Lua.
         int finished_slot = active_ring_slots[current_frame];
@@ -737,30 +753,27 @@ THREAD_FUNC render_thread_loop(void* arg) {
         }
 
         active_ring_slots[current_frame] = local_read;
-
-        // 4. Safely read the sealed packet
-        RenderPacket* p = &g_ring.packets[local_read];
         VkCommandBuffer cmd = cmd_buffers[current_frame];
 
         // 1. Wait on CPU ring buffer fence for THIS command buffer slot
-        pfnWait(g_wsi.device, 1, &g_wsi.in_flight[current_frame], VK_TRUE, UINT64_MAX);
+        pfnWait(g_wsi.device, 1, &win_wsi->in_flight[current_frame], VK_TRUE, UINT64_MAX);
 
         // 2. Acquire Image (Signaling the CPU's current_frame semaphore)
         uint32_t img_idx;
-        VkResult res = pfnAcquire(g_wsi.device, g_wsi.swapchain, UINT64_MAX, g_wsi.image_available[current_frame], VK_NULL_HANDLE, &img_idx);
+        VkResult res = pfnAcquire(g_wsi.device, win_wsi->swapchain, UINT64_MAX, win_wsi->image_available[current_frame], VK_NULL_HANDLE, &img_idx);
 
         if (res == VK_ERROR_OUT_OF_DATE_KHR) {
-            // Routed to Window 0. Update this logic when g_wsi is upgraded for multi-swapchain.
-            atomic_store_explicit(&g_engine.mailbox.window_resized[0], 1, memory_order_release);
+            // Exact resize routing dynamically tied to the WSI target
+            atomic_store_explicit(&g_engine.mailbox.window_resized[wid], 1, memory_order_release);
             SLEEP_MS(10);
             continue;
         }
 
         // 3. Reset the fence for this slot
-        pfnReset(g_wsi.device, 1, &g_wsi.in_flight[current_frame]);
+        pfnReset(g_wsi.device, 1, &win_wsi->in_flight[current_frame]);
 
-        p->swapchain_image = g_wsi.swapchain_images[img_idx];
-        p->swapchain_view = g_wsi.swapchain_views[img_idx];
+        p->swapchain_image = win_wsi->swapchain_images[img_idx];
+        p->swapchain_view = win_wsi->swapchain_views[img_idx];
 
         vkResetCommandBuffer(cmd, 0);
         vx_record_commands(cmd, p, p->draw_queue, p->draw_count, (PFN_vkCmdBeginRenderingKHR)g_wsi.pfnBegin, (PFN_vkCmdEndRenderingKHR)g_wsi.pfnEnd);
@@ -771,22 +784,22 @@ THREAD_FUNC render_thread_loop(void* arg) {
         VkSubmitInfo submitInfo = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &g_wsi.image_available[current_frame],
+            .pWaitSemaphores = &win_wsi->image_available[current_frame],
             .pWaitDstStageMask = &waitStage,
             .commandBufferCount = 1,
             .pCommandBuffers = &cmd,
             .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &g_wsi.render_finished[img_idx] // <-- TIED TO HARDWARE IMAGE
+            .pSignalSemaphores = &win_wsi->render_finished[img_idx] // <-- TIED TO HARDWARE IMAGE
         };
-        pfnSubmit(g_wsi.queue, 1, &submitInfo, g_wsi.in_flight[current_frame]);
+        pfnSubmit(g_wsi.queue, 1, &submitInfo, win_wsi->in_flight[current_frame]);
 
         // 5. Present (Wait on the GPU IMAGE semaphore)
         VkPresentInfoKHR presentInfo = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &g_wsi.render_finished[img_idx], // <-- TIED TO HARDWARE IMAGE
+            .pWaitSemaphores = &win_wsi->render_finished[img_idx], // <-- TIED TO HARDWARE IMAGE
             .swapchainCount = 1,
-            .pSwapchains = &g_wsi.swapchain,
+            .pSwapchains = &win_wsi->swapchain,
             .pImageIndices = &img_idx
         };
         pfnPresent(g_wsi.queue, &presentInfo);

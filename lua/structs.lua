@@ -77,6 +77,7 @@ M.specs = {
     {
         name = "RenderPacket", c_only = true, align = 64, force_align = true,
         members = {
+            { type = "int32_t",  name = "window_id" }, -- NEW: Multi-tenant routing tag
             { type = "DrawCommand*", name = "draw_queue" },
             { type = "uint32_t", name = "draw_count" },
             { type = "uint64_t", name = "gfx_layout" },
