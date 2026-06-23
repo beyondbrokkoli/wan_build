@@ -644,10 +644,52 @@ local function main()
 
         local last_key = ffi.C.vx_input_last_key(win_id)
         if last_key == cfg_gfx.key.esc then ffi.C.vx_core_shutdown()
-        elseif last_key == cfg_gfx.key.f5 then wants_hotswap = true
+        -- elseif last_key == cfg_gfx.key.f5 then wants_hotswap = true
         elseif last_key == cfg_gfx.key.num1 then active_render_mode = cfg_gfx.mode.dual
         elseif last_key == cfg_gfx.key.num2 then active_render_mode = cfg_gfx.mode.geom
         elseif last_key == cfg_gfx.key.num3 then active_render_mode = cfg_gfx.mode.points
+
+        -- [NEW] THE EDITOR SPAWN FLEX
+        elseif last_key == cfg_gfx.key.f5 and not editor_ctx then
+            print("\n[LUA CO] F2 Detected! Spawning Editor Domain (Window ID 1)...")
+
+            -- 1. Create a distinct config for the Editor
+            local editor_cfg = deepcopy(cfg_gfx) -- Assuming you have a deepcopy helper
+            editor_cfg.win.id = 1
+            editor_cfg.win.w = 1024
+            editor_cfg.win.h = 768
+
+            -- 2. Command C-Core to boot the OS Window
+            ffi.C.vx_sys_set_cmd(editor_cfg.win.id, editor_cfg.sys.boot, editor_cfg.win.w, editor_cfg.win.h)
+
+            -- 3. Yield gracefully until the C-Core provisions the surface
+            print("[LUA CO] Awaiting Editor Surface...")
+            while ffi.C.vx_sys_get_surface(editor_cfg.win.id) == nil do
+                sys_sleep(10) -- Short sleep, we are technically blocking the Game loop for a few ms here!
+            end
+            print("[LUA CO] Editor Surface Acquired!")
+
+            -- 4. Build the Editor Context (Sharing the Game's Vulkan Runtime)
+            editor_ctx = {
+                cfg_gfx = editor_cfg,
+                vk_runtime = vk_rt, -- Share the core GPU connection!
+                old_swapchain = ffi.cast("VkSwapchainKHR", 0) -- No old swapchain for a fresh window
+            }
+
+            -- 5. Run the Mini-Weaver sequence to build the Swapchain and Pipelines
+            local vulkan = require("vulkan_core")
+            local surface_ptr = ffi.C.vx_sys_get_surface(editor_cfg.win.id)
+
+            -- Bind the new surface to the shared instance temporarily to get support details
+            -- (Note: You may need a lighter version of finalize_device if your current one tries to recreate the VkDevice)
+            editor_ctx.surface = surface_ptr
+
+            print("[LUA CO] Building Editor Swapchain & Pipelines...")
+            seq.boot[5].action(editor_ctx) -- Swapchain
+            seq.boot[8].action(editor_ctx) -- Graphics Pipelines
+            seq.boot[9].action(editor_ctx) -- Sync Structures
+
+            print("[LUA CO] Editor Domain LIVE.\n")
         end
 
         if is_resizing then
